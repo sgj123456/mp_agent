@@ -68,7 +68,7 @@ mp_agent 采用**事件驱动的 TUI 应用架构**，核心组件通过 `tokio`
 | 字段 | 说明 |
 |---|---|
 | `chat` | 聊天区域，管理消息历史和渲染 |
-| `input` | 输入区域，管理文本编辑、历史、补全 |
+| `input` | 输入区域，管理文本编辑、历史、上下文建议、补全 |
 | `mcp` | MCP 连接管理器 |
 | `processing` | 是否正在等待 AI 响应 |
 | `streaming_buffer` | 流式接收的 token 缓冲 |
@@ -77,6 +77,9 @@ mp_agent 采用**事件驱动的 TUI 应用架构**，核心组件通过 `tokio`
 | `pending_permission` | 待处理的权限请求 |
 | `pending_choice` | 待处理的选择请求 |
 | `permission_rules` | 已记住的权限规则 |
+| `token_usage_total` | 会话累计 token 用量（prompt + completion） |
+| `token_usage_session` | 当前对话轮次的 token 用量 |
+| `pending_messages` | 等待 Agent 完成时发送的输入消息队列 |
 
 **主循环逻辑**（在 `main.rs` 的 `run_app` 中）：
 
@@ -93,11 +96,12 @@ mp_agent 采用**事件驱动的 TUI 应用架构**，核心组件通过 `tokio`
 **关键方法**：
 
 - `new()` — 创建 Agent，初始化系统提示和消息历史
-- `send_message()` — 发送用户消息并处理完整的工具调用循环
+- `send_message()` — 发送用户消息并处理完整的工具调用循环（最多 `max_iterations = 100` 轮）
 - `get_tools()` — 获取原生工具定义列表
 - `request_permission()` — 通过 oneshot 通道向 UI 请求权限
 - `execute_todo_tool()` — 执行 todo 管理工具
 - `execute_choices_tool()` — 执行多选择工具
+- `handle_tool_calls()` — 处理工具调用列表，构建消息并执行工具
 
 **消息流**：
 
@@ -184,7 +188,7 @@ UI 主线程                    Agent 任务
 
 ### 3.4 工具调用循环
 
-AI 可以连续进行多轮工具调用（最多 `max_iterations = 20` 轮）。每轮：
+AI 可以连续进行多轮工具调用（最多 `max_iterations = 100` 轮）。每轮：
 
 1. 发送当前消息 + 工具定义 → 获取流式响应
 2. 解析工具调用 → 执行工具 → 结果作为工具消息返回
@@ -199,18 +203,22 @@ AI 可以连续进行多轮工具调用（最多 `max_iterations = 20` 轮）。
     ↓
 App::handle_key_event
     ↓
-AgentCommand::SendMessage (通过 mpsc 通道)
-    ↓
-Agent::send_message
+    ├── processing 中? → 加入 pending_messages 队列
+    └── 正常状态 → AgentCommand::SendMessage (通过 mpsc 通道)
+                        ↓
+                Agent::send_message
     ├── 构建系统提示（技能 + AGENTS.md）
     ├── 附加工具定义
     ├── SSE 流式请求 → OpenAI 兼容 API
-    ├── 实时推送 AgentEvent::Token
+    ├── 实时推送 AgentEvent::Token + AgentEvent::TokenUsage
     └── 工具调用？ → permission? → execute → result
             ↓
 AgentEvent::MessageComplete
     ↓
 App::process_agent_events → ChatArea::add_message
+    ↓
+update_context_suggestions() → 提取上下文建议
+drain_pending_messages() → 发送下一条排队消息
 ```
 
 ### 4.2 权限请求流

@@ -32,7 +32,7 @@ mp_agent 是一个**运行在终端内的 AI 编程助手**，核心目标是在
 | 特性 | 说明 |
 |---|---|
 | **TUI 界面** | 基于 Ratatui + Crossterm 的全终端界面，聊天、输入、状态栏一目了然 |
-| **流式输出** | 支持 SSE 流式响应，实时显示 AI 生成的 token |
+| **流式输出** | 支持 SSE 流式响应，实时显示 AI 生成的 token，附带 token 用量统计 |
 | **工具调用** | 内置多种原生工具，AI 可自动调用完成文件操作、命令执行等任务 |
 | **MCP 协议支持** | 可连接外部 MCP 服务器，扩展工具生态 |
 | **技能系统** | 支持从 `.opencode/skills/` 目录加载自定义技能和 Agent 上下文 |
@@ -42,6 +42,9 @@ mp_agent 是一个**运行在终端内的 AI 编程助手**，核心目标是在
 | **权限审批** | 对写入文件、执行命令等敏感操作实时请求用户确认，支持记住选择（always/deny） |
 | **任务管理** | 内置 todo 工具，可添加/更新/列出/删除任务 |
 | **多选择决策** | AI 可通过 `present_choices` 工具让用户在多个方案中选择 |
+| **上下文建议** | 根据聊天历史自动提取文件路径、命令、工具名等，输入时 Tab 补全 |
+| **消息队列** | 等待 AI 响应时可继续输入，消息自动排队发送 |
+| **Token 用量统计** | 实时显示当前会话和本次响应的 token 消耗 |
 
 ## 3. 技术栈
 
@@ -111,17 +114,26 @@ mp_agent/
 ## 6. 数据流概览
 
 ```
-用户输入 → App (handle_key_event) → AgentCommand::SendMessage → Agent
-                                                              ↓
-                                              构建请求 + 系统提示 + 工具定义
-                                                              ↓
-                                              SSE 流式请求 → OpenAI 兼容 API
-                                                              ↓
-                                              解析 token → AgentEvent::Token → UI 实时渲染
-                                                              ↓
-                                              如果 AI 请求工具调用 → 检查权限 → 执行工具 → 结果返回
-                                                              ↓
-                                              AgentEvent::MessageComplete → 消息加入历史
+用户输入 (Enter)
+    ↓
+App::handle_key_event
+    ├── processing 中? → 加入 pending_messages 队列
+    └── 正常状态 → AgentCommand::SendMessage (通过 mpsc 通道)
+                                        ↓
+                                        Agent
+                        构建请求 + 系统提示 + 工具定义
+                                        ↓
+                        SSE 流式请求 → OpenAI 兼容 API
+                                        ↓
+                        解析 token → AgentEvent::Token → UI 实时渲染
+                        解析 usage → AgentEvent::TokenUsage → 更新 token 计数
+                                        ↓
+                        如果 AI 请求工具调用 → 检查权限 → 执行工具 → 结果返回
+                                        ↓
+                        AgentEvent::MessageComplete → 消息加入历史
+                                        ↓
+                        提取上下文建议 → 更新输入建议区
+                        排空 pending_messages → 发送下一条消息
 ```
 
 详细架构见 [架构设计](./02-architecture.md)。

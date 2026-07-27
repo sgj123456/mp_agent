@@ -1,7 +1,4 @@
-use std::cell::RefCell;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::sync::LazyLock;
 use std::time::Instant;
 
 use ratatui::Frame;
@@ -15,68 +12,6 @@ use super::{
     markdown,
 };
 
-/// Simple LRU cache for markdown rendering results.
-/// Avoids re-parsing the same assistant/system messages on every frame.
-struct MarkdownCache {
-    entries: Vec<(u64, Vec<Line<'static>>)>,
-}
-
-impl MarkdownCache {
-    fn new(capacity: usize) -> Self {
-        MarkdownCache {
-            entries: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn get(&mut self, text: &str) -> Option<Vec<Line<'static>>> {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        let key = hasher.finish();
-
-        for i in (0..self.entries.len()).rev() {
-            if self.entries[i].0 == key {
-                return Some(self.entries.remove(i).1);
-            }
-        }
-        None
-    }
-
-    fn put(&mut self, text: &str, lines: Vec<Line<'static>>) {
-        const CAPACITY: usize = 64;
-        if self.entries.len() >= CAPACITY {
-            self.entries.remove(0);
-        }
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        let key = hasher.finish();
-        self.entries.push((key, lines));
-    }
-}
-
-/// Global markdown cache shared across the application.
-static MARKDOWN_CACHE: LazyLock<std::sync::Mutex<RefCell<MarkdownCache>>> =
-    LazyLock::new(|| std::sync::Mutex::new(RefCell::new(MarkdownCache::new(64))));
-
-fn render_markdown_cached(text: &str) -> Vec<Line<'static>> {
-    if text.is_empty() {
-        return vec![Line::from("")];
-    }
-    {
-        let cache = MARKDOWN_CACHE.lock().unwrap();
-        let mut cache_ref = cache.borrow_mut();
-        if let Some(cached) = cache_ref.get(text) {
-            return cached;
-        }
-    }
-    let rendered = markdown::render_markdown(text);
-    {
-        let cache = MARKDOWN_CACHE.lock().unwrap();
-        let mut cache_ref = cache.borrow_mut();
-        cache_ref.put(text, rendered.clone());
-    }
-    rendered
-}
-
 #[derive(Debug, Clone)]
 pub enum ChatMessage {
     User(String),
@@ -89,6 +24,9 @@ pub enum ChatMessage {
 
 pub struct ChatArea {
     messages: Vec<(ChatMessage, Instant)>,
+    rendered_cache: Vec<Vec<Line<'static>>>,
+    compiled_output: Option<Vec<Line<'static>>>,
+    dirty: bool,
     scroll_offset: u16,
     auto_scroll: bool,
     area_height: u16,
@@ -99,6 +37,9 @@ impl ChatArea {
     pub fn new() -> Self {
         ChatArea {
             messages: Vec::new(),
+            rendered_cache: Vec::new(),
+            compiled_output: None,
+            dirty: false,
             scroll_offset: 0,
             auto_scroll: true,
             area_height: 20,
@@ -114,8 +55,182 @@ impl ChatArea {
                 self.folded.insert(idx);
             }
         }
+        let rendered = self.render_message(&msg, idx);
         self.messages.push((msg, Instant::now()));
+        self.rendered_cache.push(rendered);
+        self.dirty = true;
         self.scroll_to_bottom();
+    }
+
+    fn render_message(&self, msg: &ChatMessage, idx: usize) -> Vec<Line<'static>> {
+        match msg {
+            ChatMessage::User(text) => {
+                let mut lines = vec![Self::card_header("User", GREEN)];
+                for line in text.lines() {
+                    lines.push(Self::card_body_line(line, TEXT, false));
+                }
+                lines.push(Line::from(""));
+                lines
+            }
+            ChatMessage::Assistant(text) => {
+                let mut lines = vec![Self::card_header("Assistant", CYAN)];
+                let rendered = markdown::render_markdown(text);
+                for line in Self::wrap_markdown_lines(rendered, CYAN) {
+                    lines.push(line);
+                }
+                lines.push(Line::from(""));
+                lines
+            }
+            ChatMessage::ToolCall { name, args } => {
+                if name == "edit_file" {
+                    self.render_edit_file(name, args)
+                } else {
+                    let summary = summarize_tool_call(name, args);
+                    vec![
+                        Self::card_header(name, YELLOW),
+                        Self::card_body_line(&summary, TEXT_DIM, true),
+                    ]
+                }
+            }
+            ChatMessage::ToolResult { name, result } => self.render_tool_result(name, result, idx),
+            ChatMessage::Error(text) => {
+                let mut lines = vec![Self::card_header("Error", RED)];
+                for line in text.lines() {
+                    lines.push(Self::card_body_line(line, RED, false));
+                }
+                lines.push(Line::from(""));
+                lines
+            }
+            ChatMessage::System(text) => {
+                let mut lines = vec![Self::card_header("System", ACCENT)];
+                let rendered = markdown::render_markdown(text);
+                for line in Self::wrap_markdown_lines(rendered, ACCENT) {
+                    lines.push(line);
+                }
+                lines.push(Line::from(""));
+                lines
+            }
+        }
+    }
+
+    fn render_edit_file(&self, name: &str, args: &str) -> Vec<Line<'static>> {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
+            let path = val.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let old_s = val.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            let new_s = val.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let mut lines = vec![Self::card_header(&format!("edit_file — {}", path), YELLOW)];
+            let border = Style::default().fg(TEXT_DIM).add_modifier(Modifier::DIM);
+            lines.push(Line::from(Span::styled(
+                "  ┌─ remove ────────────────────",
+                border,
+            )));
+            for line in old_s.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  │ {}", line),
+                    Style::default().fg(DIFF_REMOVE),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  ├─ add ───────────────────────",
+                border,
+            )));
+            for line in new_s.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  │ {}", line),
+                    Style::default().fg(DIFF_ADD),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  └────────────────────────────",
+                border,
+            )));
+            lines
+        } else {
+            vec![
+                Self::card_header(name, YELLOW),
+                Self::card_body_line(&truncate(args, 80), TEXT_DIM, true),
+            ]
+        }
+    }
+
+    fn render_tool_result(&self, name: &str, result: &str, idx: usize) -> Vec<Line<'static>> {
+        let is_error = result.contains("Error:") || result.contains("⛔");
+        let (symbol, color) = if is_error {
+            ("✗", RED)
+        } else {
+            ("✔", GREEN)
+        };
+        let mut lines = vec![Self::card_header(&format!("{} {}", symbol, name), color)];
+        let mut result_lines: Vec<String> = Vec::new();
+        let mut is_diff = false;
+        for line in result.lines() {
+            result_lines.push(line.to_string());
+            if line.starts_with("--- ") || line.starts_with("+++ ") {
+                is_diff = true;
+            }
+        }
+        let total = result_lines.len();
+        let fold_threshold = 12;
+        let show_fold = total > fold_threshold && !is_error && !is_diff;
+        let is_folded = show_fold && self.folded.contains(&idx);
+        let shown = if is_folded { fold_threshold } else { total };
+
+        if is_diff {
+            let dim = Style::default().fg(TEXT_DIM).add_modifier(Modifier::DIM);
+            lines.push(Line::from(Span::styled(
+                "  ┌─ diff ────────────────────────",
+                dim,
+            )));
+            for line in result_lines.iter().take(shown) {
+                if line.starts_with("--- ") || line.starts_with("+++ ") {
+                    lines.push(Line::from(Span::styled(
+                        format!("  │{}", line),
+                        Style::default().fg(DIFF_HEADER),
+                    )));
+                } else if line.starts_with("@@ ") {
+                    lines.push(Line::from(Span::styled(
+                        format!("  │{}", line),
+                        Style::default().fg(TEXT_DIM),
+                    )));
+                } else if line.starts_with('-') {
+                    lines.push(Line::from(Span::styled(
+                        format!("  │{}", line),
+                        Style::default().fg(DIFF_REMOVE),
+                    )));
+                } else if line.starts_with('+') {
+                    lines.push(Line::from(Span::styled(
+                        format!("  │{}", line),
+                        Style::default().fg(DIFF_ADD),
+                    )));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        format!("  │{}", line),
+                        Style::default().fg(TEXT_DIM),
+                    )));
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "  └────────────────────────────",
+                dim,
+            )));
+        } else if is_error {
+            for line in result_lines.iter().take(shown) {
+                lines.push(Self::card_body_line(line, RED, false));
+            }
+        } else {
+            for line in result_lines.iter().take(shown) {
+                lines.push(Self::card_body_line(line, TEXT_DIM, true));
+            }
+        }
+        if is_folded {
+            let remaining = total - fold_threshold;
+            lines.push(Line::from(Span::styled(
+                format!("  … {} lines folded (click to expand)", remaining),
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines
     }
 
     pub fn scroll_up(&mut self) {
@@ -176,6 +291,8 @@ impl ChatArea {
                             self.folded.insert(idx);
                         }
                     }
+                    self.rendered_cache[idx] = self.render_message(msg, idx);
+                    self.dirty = true;
                 }
                 break;
             }
@@ -198,54 +315,8 @@ impl ChatArea {
         }
     }
 
-    fn message_lines(&self, msg: &ChatMessage, idx: usize) -> usize {
-        match msg {
-            ChatMessage::User(text) => text.lines().count() + 2,
-            ChatMessage::Assistant(text) => {
-                let rendered = render_markdown_cached(text);
-                // header + rendered content lines + trailing empty
-                rendered.len() + 2
-            }
-            ChatMessage::ToolCall { name, args } => {
-                if name == "edit_file" {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
-                        let old_s = val.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-                        let new_s = val.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-                        // header + remove-box-header + old-lines + add-box-header + new-lines + box-footer
-                        1 + 3 + old_s.lines().count() + new_s.lines().count()
-                    } else {
-                        2
-                    }
-                } else {
-                    // header + summary body line (no trailing empty)
-                    2
-                }
-            }
-            ChatMessage::ToolResult { result, .. } => {
-                let result_lines: Vec<&str> = result.lines().collect();
-                let total = result_lines.len();
-                let is_diff = result_lines
-                    .iter()
-                    .any(|l| l.starts_with("--- ") || l.starts_with("+++ "));
-                let is_error = result.contains("Error:") || result.contains("⛔");
-                let show_fold = total > 12 && !is_error && !is_diff;
-                let is_folded = show_fold && self.folded.contains(&idx);
-                let shown = if is_folded { 12 } else { total };
-                if is_diff {
-                    // header + diff-box-header + shown content + diff-box-footer + trailing empty
-                    shown + 4
-                } else {
-                    // header + shown content + trailing empty (+ fold indicator if folded)
-                    let fold = if is_folded { 1 } else { 0 };
-                    shown + 2 + fold
-                }
-            }
-            ChatMessage::Error(text) => text.lines().count() + 2,
-            ChatMessage::System(text) => {
-                let rendered = render_markdown_cached(text);
-                rendered.len() + 2
-            }
-        }
+    fn message_lines(&self, _msg: &ChatMessage, idx: usize) -> usize {
+        self.rendered_cache.get(idx).map(|c| c.len()).unwrap_or(0)
     }
 
     fn card_header(name: &str, fg: Color) -> Line<'static> {
@@ -302,178 +373,37 @@ impl ChatArea {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    fn build_lines(&self, preview: Option<&str>) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
+    fn build_lines(&mut self, preview: Option<&str>) -> Vec<Line<'static>> {
+        if preview.is_some() {
+            self.dirty = true;
+        }
 
-        for (idx, (msg, _time)) in self.messages.iter().enumerate() {
-            match msg {
-                ChatMessage::User(text) => {
-                    lines.push(Self::card_header("User", GREEN));
-                    for line in text.lines() {
-                        lines.push(Self::card_body_line(line, TEXT, false));
-                    }
-                    lines.push(Line::from(""));
-                }
-                ChatMessage::Assistant(text) => {
-                    lines.push(Self::card_header("Assistant", CYAN));
-                    let rendered = render_markdown_cached(text);
-                    for line in Self::wrap_markdown_lines(rendered, CYAN) {
-                        lines.push(line);
-                    }
-                    lines.push(Line::from(""));
-                }
-                ChatMessage::ToolCall { name, args } => {
-                    if name == "edit_file" {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
-                            let path = val.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-                            let old_s =
-                                val.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-                            let new_s =
-                                val.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-                            lines.push(Self::card_header(&format!("edit_file — {}", path), YELLOW));
-                            let border = Style::default().fg(TEXT_DIM).add_modifier(Modifier::DIM);
-                            lines.push(Line::from(Span::styled(
-                                "  ┌─ remove ────────────────────",
-                                border,
-                            )));
-                            for line in old_s.lines() {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  │ {}", line),
-                                    Style::default().fg(DIFF_REMOVE),
-                                )));
-                            }
-                            lines.push(Line::from(Span::styled(
-                                "  ├─ add ───────────────────────",
-                                border,
-                            )));
-                            for line in new_s.lines() {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  │ {}", line),
-                                    Style::default().fg(DIFF_ADD),
-                                )));
-                            }
-                            lines.push(Line::from(Span::styled(
-                                "  └────────────────────────────",
-                                border,
-                            )));
-                        } else {
-                            lines.push(Self::card_header(name, YELLOW));
-                            lines.push(Self::card_body_line(&truncate(args, 80), TEXT_DIM, true));
-                        }
-                    } else {
-                        let summary = summarize_tool_call(name, args);
-                        lines.push(Self::card_header(name, YELLOW));
-                        lines.push(Self::card_body_line(&summary, TEXT_DIM, true));
-                    }
-                }
-                ChatMessage::ToolResult { name, result } => {
-                    let is_error = result.contains("Error:") || result.contains("⛔");
-                    let (symbol, color) = if is_error {
-                        ("✗", RED)
-                    } else {
-                        ("✔", GREEN)
-                    };
-                    lines.push(Self::card_header(&format!("{} {}", symbol, name), color));
-                    let mut result_lines: Vec<String> = Vec::new();
-                    let mut is_diff = false;
-                    for line in result.lines() {
-                        result_lines.push(line.to_string());
-                        if line.starts_with("--- ") || line.starts_with("+++ ") {
-                            is_diff = true;
-                        }
-                    }
-                    let total = result_lines.len();
-                    let fold_threshold = 12;
-                    let show_fold = total > fold_threshold && !is_error && !is_diff;
-                    let is_folded = show_fold && self.folded.contains(&idx);
-                    let shown = if is_folded { fold_threshold } else { total };
-
-                    if is_diff {
-                        let dim = Style::default().fg(TEXT_DIM).add_modifier(Modifier::DIM);
-                        lines.push(Line::from(Span::styled(
-                            "  ┌─ diff ────────────────────────",
-                            dim,
-                        )));
-                        for line in result_lines.iter().take(shown) {
-                            if line.starts_with("--- ") || line.starts_with("+++ ") {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  │{}", line),
-                                    Style::default().fg(DIFF_HEADER),
-                                )));
-                            } else if line.starts_with("@@ ") {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  │{}", line),
-                                    Style::default().fg(TEXT_DIM),
-                                )));
-                            } else if line.starts_with('-') {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  │{}", line),
-                                    Style::default().fg(DIFF_REMOVE),
-                                )));
-                            } else if line.starts_with('+') {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  │{}", line),
-                                    Style::default().fg(DIFF_ADD),
-                                )));
-                            } else {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  │{}", line),
-                                    Style::default().fg(TEXT_DIM),
-                                )));
-                            }
-                        }
-                        lines.push(Line::from(Span::styled(
-                            "  └────────────────────────────",
-                            dim,
-                        )));
-                    } else if is_error {
-                        for line in result_lines.iter().take(shown) {
-                            lines.push(Self::card_body_line(line, RED, false));
-                        }
-                    } else {
-                        for line in result_lines.iter().take(shown) {
-                            lines.push(Self::card_body_line(line, TEXT_DIM, true));
-                        }
-                    }
-                    if is_folded {
-                        let remaining = total - fold_threshold;
-                        lines.push(Line::from(Span::styled(
-                            format!("  … {} lines folded (click to expand)", remaining),
-                            Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
-                        )));
-                    }
-                    lines.push(Line::from(""));
-                }
-                ChatMessage::Error(text) => {
-                    lines.push(Self::card_header("Error", RED));
-                    for line in text.lines() {
-                        lines.push(Self::card_body_line(line, RED, false));
-                    }
-                    lines.push(Line::from(""));
-                }
-                ChatMessage::System(text) => {
-                    lines.push(Self::card_header("System", ACCENT));
-                    let rendered = markdown::render_markdown(text);
-                    for line in Self::wrap_markdown_lines(rendered, ACCENT) {
-                        lines.push(line);
-                    }
-                    lines.push(Line::from(""));
-                }
+        if !self.dirty {
+            if let Some(ref cached) = self.compiled_output {
+                return cached.clone();
             }
+        }
+
+        let total: usize = self.rendered_cache.iter().map(|c| c.len()).sum();
+        let extra = if preview.is_some() { 5 } else { 0 };
+        let mut lines = Vec::with_capacity(total + extra);
+
+        for cached in &self.rendered_cache {
+            lines.extend(cached.iter().cloned());
         }
 
         if let Some(preview_text) = preview {
-            if preview_text.is_empty() {
-                return lines;
+            if !preview_text.is_empty() {
+                lines.push(Self::card_header("Assistant (streaming)", CYAN));
+                for line in preview_text.lines() {
+                    lines.push(Self::card_body_line(line, TEXT, false));
+                }
+                lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
             }
-            lines.push(Self::card_header("Assistant (streaming)", CYAN));
-            let rendered = markdown::render_markdown(preview_text);
-            for line in Self::wrap_markdown_lines(rendered, CYAN) {
-                lines.push(line);
-            }
-            lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
         }
 
+        self.compiled_output = Some(lines.clone());
+        self.dirty = false;
         lines
     }
 
@@ -513,6 +443,12 @@ impl ChatArea {
         let lines = self.build_lines(None);
         self.compute_scroll(&lines, area.height);
         self.render_lines(frame, area, lines);
+    }
+
+    /// Return an iterator over the chat messages (message + timestamp).
+    /// Used by the input area to extract context suggestions.
+    pub fn messages(&self) -> &[(ChatMessage, std::time::Instant)] {
+        &self.messages
     }
 }
 

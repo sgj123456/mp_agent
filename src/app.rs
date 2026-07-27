@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::mcp::McpManager;
 use crate::permission::{PermissionDecision, PermissionRequest, PermissionRule, match_rule};
 use crate::ui::chat::{ChatArea, ChatMessage};
-use crate::ui::input::InputArea;
+use crate::ui::input::{InputArea, SuggestionItem};
 use crate::ui::{BG, CYAN, SURFACE, TEXT, YELLOW};
 
 pub enum AgentCommand {
@@ -186,10 +186,8 @@ impl App {
                             // Agent is still processing; buffer the message for later.
                             self.pending_messages.push(input.clone());
                             self.input.clear();
-                            self.status_message = format!(
-                                "Processing... ({} queued)",
-                                self.pending_messages.len()
-                            );
+                            self.status_message =
+                                format!("Processing... ({} queued)", self.pending_messages.len());
                         } else {
                             self.processing = true;
                             self.streaming_buffer.clear();
@@ -426,6 +424,12 @@ impl App {
         }
     }
 
+    /// Refresh the input area's context suggestions based on the current chat history.
+    fn update_context_suggestions(&mut self) {
+        let suggestions = extract_context_suggestions(&self.chat);
+        self.input.set_context_suggestions(suggestions);
+    }
+
     pub fn process_agent_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -441,6 +445,7 @@ impl App {
                     self.chat.add_message(ChatMessage::Assistant(text));
                     self.streaming_buffer.clear();
                     self.processing = false;
+                    self.update_context_suggestions();
                     self.drain_pending_messages();
                 }
                 AgentEvent::ToolCallStart { name, args } => {
@@ -466,6 +471,9 @@ impl App {
                     self.status_message = "Error".to_string();
                 }
                 AgentEvent::Status(msg) => {
+                    if msg == "Thinking..." {
+                        self.streaming_buffer.clear();
+                    }
                     self.status_message = msg;
                 }
                 AgentEvent::PermissionRequired { request, respond } => {
@@ -680,4 +688,139 @@ async fn run_agent_task(mut agent: Agent, mut cmd_rx: mpsc::UnboundedReceiver<Ag
             }
         }
     }
+}
+
+/// Extract context suggestions from the current chat messages.
+/// Scans user, assistant, tool-call and tool-result messages for file paths,
+/// shell commands, tool names and todo descriptions that the user may want to
+/// reuse, and returns a de-duplicated list of SuggestionItem.
+fn extract_context_suggestions(chat: &ChatArea) -> Vec<SuggestionItem> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut suggestions = Vec::new();
+
+    for (msg, _time) in chat.messages() {
+        match msg {
+            ChatMessage::User(text) => {
+                for candidate in extract_candidates(text) {
+                    if seen.insert(candidate.clone()) {
+                        suggestions.push(SuggestionItem::Context(candidate));
+                    }
+                }
+            }
+            ChatMessage::Assistant(text) => {
+                for candidate in extract_candidates(text) {
+                    if seen.insert(candidate.clone()) {
+                        suggestions.push(SuggestionItem::Context(candidate));
+                    }
+                }
+            }
+            ChatMessage::ToolCall { name, args } => {
+                if seen.insert(name.clone()) {
+                    suggestions.push(SuggestionItem::Context(format!("/tools {}", name)));
+                }
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
+                    for s in extract_json_strings(&val) {
+                        if seen.insert(s.clone()) {
+                            suggestions.push(SuggestionItem::Context(s));
+                        }
+                    }
+                }
+            }
+            ChatMessage::ToolResult { name, result } => {
+                if seen.insert(name.clone()) {
+                    suggestions.push(SuggestionItem::Context(format!("/tools {}", name)));
+                }
+                for candidate in extract_candidates(result) {
+                    if seen.insert(candidate.clone()) {
+                        suggestions.push(SuggestionItem::Context(candidate));
+                    }
+                }
+            }
+            ChatMessage::Error(text) | ChatMessage::System(text) => {
+                for candidate in extract_candidates(text) {
+                    if seen.insert(candidate.clone()) {
+                        suggestions.push(SuggestionItem::Context(candidate));
+                    }
+                }
+            }
+        }
+    }
+
+    let max = 20;
+    if suggestions.len() > max {
+        suggestions.truncate(max);
+    }
+
+    suggestions
+}
+
+/// Heuristic candidate extraction from free-form text.
+/// Looks for file-path-like strings, quoted commands, and other reusable tokens.
+fn extract_candidates(text: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| c.is_ascii_punctuation());
+        if trimmed.is_empty() || trimmed.len() < 3 {
+            continue;
+        }
+
+        if trimmed.contains('/') || (trimmed.contains('.') && trimmed.len() > 4) {
+            candidates.push(trimmed.to_string());
+        }
+
+        if trimmed.starts_with("cargo ")
+            || trimmed.starts_with("git ")
+            || trimmed.starts_with("ls ")
+            || trimmed.starts_with("cat ")
+        {
+            candidates.push(trimmed.to_string());
+        }
+    }
+
+    let mut in_quote = false;
+    let mut quote_char = '"';
+    let mut current = String::new();
+    for ch in text.chars() {
+        if !in_quote && (ch == '"' || ch == '\'') {
+            in_quote = true;
+            quote_char = ch;
+            current.clear();
+        } else if in_quote && ch == quote_char {
+            in_quote = false;
+            if current.len() >= 3 {
+                candidates.push(current.clone());
+            }
+        } else if in_quote {
+            current.push(ch);
+        }
+    }
+
+    candidates
+}
+
+/// Walk a JSON value and collect every string leaf into a vector.
+fn extract_json_strings(value: &serde_json::Value) -> Vec<String> {
+    let mut result = Vec::new();
+    match value {
+        serde_json::Value::String(s) => {
+            if s.len() >= 3 {
+                result.push(s.clone());
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                result.extend(extract_json_strings(item));
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (_, v) in obj {
+                result.extend(extract_json_strings(v));
+            }
+        }
+        _ => {}
+    }
+    result
 }

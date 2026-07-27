@@ -16,6 +16,35 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/history", "Show command history"),
 ];
 
+/// A suggestion item that can be displayed in the input suggestion panel.
+/// Slash commands are static, while context suggestions are dynamically
+/// extracted from the chat history (e.g. file paths, commands, todo text).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SuggestionItem {
+    SlashCommand(&'static str, &'static str),
+    Context(String),
+}
+
+impl SuggestionItem {
+    pub fn label(&self) -> String {
+        match self {
+            SuggestionItem::SlashCommand(cmd, _) => cmd.to_string(),
+            SuggestionItem::Context(text) => text.clone(),
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match self {
+            SuggestionItem::SlashCommand(_, desc) => desc.to_string(),
+            SuggestionItem::Context(_) => "From context".to_string(),
+        }
+    }
+
+    pub fn is_context(&self) -> bool {
+        matches!(self, SuggestionItem::Context(_))
+    }
+}
+
 pub struct InputArea {
     buffer: String,
     cursor_pos: usize,
@@ -23,6 +52,10 @@ pub struct InputArea {
     history_pos: Option<usize>,
     tab_suggestion: Option<String>,
     suggestion_cursor: Option<usize>,
+    /// Dynamic suggestions derived from chat context (file paths, commands,
+    /// todo descriptions, etc.) shown alongside slash commands when the
+    /// input is empty or starts with a partial match.
+    context_suggestions: Vec<SuggestionItem>,
 }
 
 impl InputArea {
@@ -34,6 +67,7 @@ impl InputArea {
             history_pos: None,
             tab_suggestion: None,
             suggestion_cursor: None,
+            context_suggestions: Vec::new(),
         }
     }
 
@@ -67,6 +101,18 @@ impl InputArea {
         self.history_pos = None;
         self.tab_suggestion = None;
         self.suggestion_cursor = None;
+    }
+
+    /// Set the dynamic context suggestions extracted from chat history.
+    pub fn set_context_suggestions(&mut self, suggestions: Vec<SuggestionItem>) {
+        self.context_suggestions = suggestions;
+        // Don't reset suggestion_cursor on context update; the user may be
+        // navigating and we want the list to stay stable.
+    }
+
+    /// Clear all dynamic context suggestions.
+    pub fn clear_context_suggestions(&mut self) {
+        self.context_suggestions.clear();
     }
 
     pub fn get_input(&self) -> String {
@@ -167,11 +213,12 @@ impl InputArea {
     pub fn accept_selected_suggestion(&mut self) -> Option<String> {
         let idx = self.suggestion_cursor?;
         let matches = self.matching_commands();
-        let (cmd, _) = *matches.get(idx)?;
-        self.buffer = cmd.to_string();
+        let item = matches.get(idx)?;
+        let label = item.label();
+        self.buffer = label.clone();
         self.cursor_pos = self.buffer.len();
         self.suggestion_cursor = None;
-        Some(cmd.to_string())
+        Some(label.clone())
     }
 
     pub fn tab_complete(&mut self) {
@@ -186,53 +233,102 @@ impl InputArea {
 
         if let Some(idx) = self.suggestion_cursor {
             let matches = self.matching_commands();
-            if let Some((cmd, _)) = matches.get(idx) {
-                self.buffer = cmd.to_string();
+            if let Some(item) = matches.get(idx) {
+                self.buffer = item.label();
                 self.cursor_pos = self.buffer.len();
                 return;
             }
         }
 
-        if input.starts_with('/') {
+        if input.is_empty() || input.starts_with('/') {
             let partial = input.to_lowercase();
-            let matches: Vec<&str> = SLASH_COMMANDS
-                .iter()
-                .map(|(cmd, _)| *cmd)
-                .filter(|cmd| cmd.starts_with(&partial))
+            let matches: Vec<SuggestionItem> = self
+                .matching_commands()
+                .into_iter()
+                .filter(|s| s.label().to_lowercase().starts_with(&partial))
                 .collect();
 
             if matches.len() == 1 {
-                self.buffer = matches[0].to_string();
+                self.buffer = matches[0].label();
                 self.cursor_pos = self.buffer.len();
             } else if !matches.is_empty() {
-                let common_prefix = common_prefix(&matches);
+                let labels: Vec<String> = matches.iter().map(|s| s.label()).collect();
+                let common_prefix = common_prefix_str(&labels);
                 if common_prefix.len() > self.buffer.len() {
-                    self.buffer = common_prefix.to_string();
+                    self.buffer = common_prefix;
                     self.cursor_pos = self.buffer.len();
-                } else if !matches.is_empty() {
-                    self.tab_suggestion = Some(matches[0].to_string());
+                } else {
+                    self.tab_suggestion = Some(matches[0].label());
+                }
+            }
+        } else {
+            // Non-slash input: tab-complete against context suggestions.
+            let partial = input.to_lowercase();
+            let matches: Vec<SuggestionItem> = self
+                .context_suggestions
+                .iter()
+                .filter(|s| s.label().to_lowercase().starts_with(&partial))
+                .cloned()
+                .collect();
+
+            if matches.len() == 1 {
+                self.buffer = matches[0].label();
+                self.cursor_pos = self.buffer.len();
+            } else if !matches.is_empty() {
+                let labels: Vec<String> = matches.iter().map(|s| s.label()).collect();
+                let common_prefix = common_prefix_str(&labels);
+                if common_prefix.len() > self.buffer.len() {
+                    self.buffer = common_prefix;
+                    self.cursor_pos = self.buffer.len();
+                } else {
+                    self.tab_suggestion = Some(matches[0].label());
                 }
             }
         }
     }
 
-    pub fn matching_commands(&self) -> Vec<(&'static str, &'static str)> {
+    /// Return all suggestions (slash commands + context items) that match the
+    /// current input buffer. When the buffer is empty, all context suggestions
+    /// are shown. When the buffer starts with '/', only slash commands matching
+    /// the partial text are returned. Otherwise context suggestions whose label
+    /// starts with the input (case-insensitive) are returned.
+    pub fn matching_commands(&self) -> Vec<SuggestionItem> {
         let input = self.buffer.trim_start();
-        if !input.starts_with('/') {
-            return Vec::new();
+        if input.is_empty() {
+            // Empty input: show all context suggestions (slash commands are
+            // only shown when the user starts typing '/').
+            return self.context_suggestions.clone();
         }
-        let partial = input.to_lowercase();
-        SLASH_COMMANDS
-            .iter()
-            .filter(|(cmd, _)| cmd.starts_with(&partial))
-            .copied()
-            .collect()
+
+        if input.starts_with('/') {
+            let partial = input.to_lowercase();
+            let mut matches: Vec<SuggestionItem> = SLASH_COMMANDS
+                .iter()
+                .filter(|(cmd, _)| cmd.starts_with(&partial))
+                .map(|(cmd, desc)| SuggestionItem::SlashCommand(*cmd, *desc))
+                .collect();
+            // Also include context suggestions that start with the partial
+            // text, so context items are always discoverable.
+            let ctx_matches: Vec<SuggestionItem> = self
+                .context_suggestions
+                .iter()
+                .filter(|s| s.label().to_lowercase().starts_with(&partial))
+                .cloned()
+                .collect();
+            matches.extend(ctx_matches);
+            matches
+        } else {
+            // Non-slash input: match against context suggestions only.
+            let partial = input.to_lowercase();
+            self.context_suggestions
+                .iter()
+                .filter(|s| s.label().to_lowercase().starts_with(&partial))
+                .cloned()
+                .collect()
+        }
     }
 
     pub fn suggestion_count(&self) -> usize {
-        if !self.buffer.starts_with('/') {
-            return 0;
-        }
         self.matching_commands().len()
     }
 
@@ -243,31 +339,48 @@ impl InputArea {
         }
 
         let mut lines = Vec::new();
-        for (i, (cmd, desc)) in matches.iter().enumerate() {
+        for (i, item) in matches.iter().enumerate() {
             let selected = self.suggestion_cursor == Some(i);
             let bullet = if selected { " ▶ " } else { "   " };
+            let is_context = item.is_context();
+            let label = item.label();
+            let desc = item.description();
+
+            let label_style = if selected {
+                Style::default()
+                    .fg(CYAN)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else if is_context {
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)
+            };
+
+            let desc_fg = if selected { TEXT_DIM } else { TEXT_DIM };
+            let desc_text = if is_context {
+                format!(" (from context)")
+            } else {
+                format!(" {}", desc)
+            };
+
             lines.push(Line::from(vec![
                 Span::styled(
                     bullet,
                     Style::default().fg(if selected { CYAN } else { TEXT_DIM }),
                 ),
-                Span::styled(
-                    format!("{:<12}", cmd),
-                    Style::default()
-                        .fg(if selected { CYAN } else { YELLOW })
-                        .add_modifier(if selected {
-                            Modifier::BOLD | Modifier::UNDERLINED
-                        } else {
-                            Modifier::BOLD
-                        }),
-                ),
-                Span::styled(format!(" {}", desc), Style::default().fg(TEXT_DIM)),
+                Span::styled(format!("{:<14}", label), label_style),
+                Span::styled(desc_text, Style::default().fg(desc_fg)),
             ]));
         }
 
+        let title = if self.context_suggestions.is_empty() {
+            " Commands "
+        } else {
+            " Context & Commands "
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Commands ")
+            .title(title)
             .border_style(Style::default().fg(YELLOW));
         let paragraph = Paragraph::new(lines).block(block);
         frame.render_widget(paragraph, area);
@@ -323,11 +436,11 @@ impl InputArea {
     }
 }
 
-fn common_prefix(strings: &[&str]) -> String {
+fn common_prefix_str(strings: &[String]) -> String {
     if strings.is_empty() {
         return String::new();
     }
-    let first = strings[0];
+    let first = &strings[0];
     let mut prefix_len = first.len();
     for s in &strings[1..] {
         prefix_len = first

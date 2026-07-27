@@ -28,25 +28,30 @@
 - **权限审批**：对写入文件、执行命令等敏感操作实时请求用户确认，支持记住选择（always/deny）
 - **任务管理（Todo）**：内置 todo 列表，支持增删改查和优先级管理
 - **决策呈现**：当有多种方案时，AI 可以呈现选项供用户选择
+- **上下文建议**：根据聊天历史自动提取文件路径、命令、工具名等，输入时 Tab 补全
+- **消息队列**：等待 AI 响应时可继续输入，消息自动排队发送
+- **Token 统计**：实时显示当前会话和本次响应的 token 消耗
+- **结果折叠**：长工具调用结果自动折叠，按 `z` 展开/收起
 
 ## 架构
 
 ```
 src/
 ├── main.rs          # 入口：初始化 TUI、配置、事件循环
-├── app.rs           # 应用状态：键盘/鼠标事件处理、界面绘制、权限审批、Agent 事件消费
-├── agent.rs         # AI Agent：流式聊天、工具调用循环、消息管理、权限请求、选择请求
+├── app.rs           # 应用状态：键盘/鼠标事件处理、界面绘制、权限审批、Agent 事件消费、上下文建议提取
+├── agent.rs         # AI Agent：流式聊天、工具调用循环、消息管理、权限/选择请求、todo 管理
 ├── config.rs        # 配置：从 .env 加载 API 密钥、模型等
 ├── mcp.rs           # MCP 管理器：连接外部 MCP 服务器、工具映射
 ├── permission.rs    # 权限管理：操作类型、规则匹配、路径处理、记忆决策
 ├── error.rs         # 错误处理：color-eyre 钩子安装
 ├── agent/
+│   ├── request.rs   # SSE 流式请求解析：token 流解析、usage 统计、事件推送
 │   ├── tools.rs     # 原生工具定义与执行（bash、文件操作、搜索、todo 管理、present_choices）
 │   └── skill.rs     # 技能加载、AGENTS.md 读取、系统提示构建
 └── ui/
-    ├── chat.rs      # 聊天区域：消息渲染、滚动条、流式预览
-    ├── input.rs     # 输入区域：命令行编辑、历史、Tab 补全、Slash 命令
-    ├── markdown.rs  # Markdown 渲染器：pulldown-cmark → Ratatui
+    ├── chat.rs      # 聊天区域：消息渲染、滚动条、流式预览、工具结果折叠
+    ├── input.rs     # 输入区域：命令行编辑、历史、Tab 补全、Slash 命令、上下文建议
+    ├── markdown.rs  # Markdown 渲染器：pulldown-cmark → Ratatui（含语法高亮）
     └── layout.rs    # 布局工具
 ```
 
@@ -175,8 +180,29 @@ cargo run
 | `←/→` | 光标左右移动 |
 | `↑/↓` | 输入历史 / 滚动聊天 |
 | `PageUp/PageDown` | 翻页滚动 |
-| `Tab` | 命令/建议补全 |
+| `Tab` | 命令/上下文建议补全 |
+| `z` | 展开/折叠长工具结果 |
 | `Esc` | 取消生成 / 退出程序 |
+
+### 上下文建议
+
+输入时会根据当前聊天历史自动提供上下文建议，按 **Tab** 补全：
+
+- **文件路径**：消息中出现的含 `/` 或 `.` 的路径字符串
+- **命令前缀**：以 `cargo`、`git`、`ls`、`cat` 开头的命令
+- **工具名**：已调用的工具名称（如 `/tools bash`）
+- **引号内容**：消息中的引号内文本
+
+建议最多显示 20 条，输入 `/` 时同时显示 slash 命令和上下文建议。
+
+### 消息队列
+
+等待 AI 响应时仍可继续输入，不会阻塞：
+
+- 按 **Enter** 将当前输入加入排队队列
+- 状态栏显示 `Processing... (N queued)` 提示排队数量
+- 当前轮次完成后自动发送下一条排队消息
+- 按 **Esc** 取消处理并清空所有排队消息
 
 ### 技能系统
 
@@ -198,11 +224,14 @@ Agent 会自动从以下路径加载技能文件（`.md` / `.txt` / `.skill`）�
 ## 工作流程
 
 1. 用户输入消息 → `App` 通过 channel 发送 `AgentCommand::SendMessage`
-2. `Agent` 构建请求，附加系统提示 + 工具定义，发起流式 SSE 请求
-3. 响应流解析为 token → `AgentEvent::Token` → UI 实时渲染
+   - 如果 Agent 正在处理，输入加入 `pending_messages` 队列
+2. `Agent` 构建请求（系统提示 + AGENTS.md 上下文 + 技能 + 工具定义），发起流式 SSE 请求
+3. 响应流解析为 token → `AgentEvent::Token` + `AgentEvent::TokenUsage` → UI 实时渲染 + token 统计
 4. 如果 AI 请求工具调用 → 检查是否需要权限 → 如需则弹出审批 → 执行对应工具 → 结果返回给 Agent → 继续对话
 5. 如果 AI 需要用户做选择（`present_choices`）→ 弹出选项列表 → 用户选择 → 结果返回给 Agent
 6. 完成后发送 `AgentEvent::MessageComplete` → 消息加入聊天历史
+7. `update_context_suggestions()` 提取上下文建议 → 更新输入建议区
+8. `drain_pending_messages()` 排空排队消息 → 发送下一条
 
 ## 开发
 

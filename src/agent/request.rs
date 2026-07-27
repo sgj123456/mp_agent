@@ -199,10 +199,7 @@ pub async fn parse_stream(
                         .unwrap_or(0);
                     // Emit the usage event directly from the parser.
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(AgentEvent::TokenUsage {
-                            prompt,
-                            completion,
-                        });
+                        let _ = tx.send(AgentEvent::TokenUsage { prompt, completion });
                     }
                     // Don't pollute the content stream with usage text.
                     continue;
