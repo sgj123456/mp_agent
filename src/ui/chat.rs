@@ -448,6 +448,25 @@ impl ChatArea {
     pub fn messages(&self) -> &[(ChatMessage, std::time::Instant)] {
         &self.messages
     }
+
+    /// Return the rendered lines as plain-text strings (one per visual line).
+    /// Used by the app to extract text for mouse-selection copying.
+    pub fn plain_text_lines(&self) -> Vec<String> {
+        self.compiled_output
+            .as_ref()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|s| s.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 fn safe_truncate(s: &str, max_chars: usize) -> String {
