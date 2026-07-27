@@ -2,8 +2,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
-use unicode_width::UnicodeWidthStr;
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use super::{BG, CYAN, RED, TEXT, TEXT_DIM, YELLOW};
 
@@ -326,6 +326,73 @@ impl InputArea {
         self.matching_commands().len()
     }
 
+    /// Ghost suffix text shown after the buffer as a dim completion hint.
+    fn ghost_suffix_text(&self) -> Option<String> {
+        let buffer = &self.buffer;
+        if buffer.is_empty() || buffer.starts_with('/') {
+            return None;
+        }
+        self.matching_commands().first().and_then(|item| {
+            let label = item.label();
+            if label.len() > buffer.len()
+                && label.to_lowercase().starts_with(&buffer.to_lowercase())
+            {
+                Some(label[buffer.len()..].to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn visual_line_count(text: &str, content_width: usize) -> u16 {
+        if text.is_empty() || content_width == 0 {
+            return 1;
+        }
+        let mut line_w = 0usize;
+        let mut lines = 1u16;
+        for c in text.chars() {
+            let w = c.width().unwrap_or(0);
+            if line_w + w > content_width {
+                lines += 1;
+                line_w = w;
+            } else {
+                line_w += w;
+            }
+        }
+        lines
+    }
+
+    /// Estimate how many visual lines the full input (buffer + ghost suffix)
+    /// occupies when wrapped at `content_width` columns. At least 1.
+    pub fn wrapped_height(&self, content_width: u16) -> u16 {
+        let combined = match self.ghost_suffix_text() {
+            Some(ghost) => format!("{}{}", self.buffer, ghost),
+            None => self.buffer.clone(),
+        };
+        Self::visual_line_count(&combined, content_width as usize)
+    }
+
+    /// Compute (row, col) of the cursor inside the wrapped content area.
+    fn cursor_line_col(&self, content_width: u16) -> (u16, u16) {
+        if content_width == 0 {
+            return (0, 0);
+        }
+        let cw = content_width as usize;
+        let text_before = &self.buffer[..self.cursor_pos];
+        let mut line = 0u16;
+        let mut col = 0usize;
+        for c in text_before.chars() {
+            let w = c.width().unwrap_or(0);
+            if col + w > cw {
+                line += 1;
+                col = w;
+            } else {
+                col += w;
+            }
+        }
+        (line, col as u16)
+    }
+
     pub fn render_suggestions(&self, frame: &mut Frame, area: Rect) {
         let matches = self.matching_commands();
         if matches.is_empty() {
@@ -342,15 +409,16 @@ impl InputArea {
 
             let label_style = if selected {
                 Style::default()
-                    .fg(CYAN)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    .fg(BG)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD)
             } else if is_context {
                 Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)
             };
 
-            let desc_fg = if selected { TEXT_DIM } else { TEXT_DIM };
+            let desc_fg = if selected { CYAN } else { TEXT_DIM };
             let desc_text = if is_context {
                 format!(" (from context)")
             } else {
@@ -367,40 +435,21 @@ impl InputArea {
             ]));
         }
 
-        let title = if self.context_suggestions.is_empty() {
-            " Commands "
-        } else {
-            " Context & Commands "
-        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(YELLOW));
+            .title(" Suggestions ")
+            .border_style(Style::default().fg(CYAN));
         let paragraph = Paragraph::new(lines).block(block);
         frame.render_widget(paragraph, area);
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let mut spans = Vec::new();
+        let content_width = area.width.saturating_sub(2);
         let buffer = &self.buffer;
         let is_slash_command = buffer.starts_with('/');
 
-        // Find ghost suffix: for non-slash input with partial text, show the
-        // remainder of the first matching suggestion in dim style.
-        let ghost_suffix = if !buffer.is_empty() && !is_slash_command {
-            self.matching_commands().first().and_then(|item| {
-                let label = item.label();
-                if label.len() > buffer.len()
-                    && label.to_lowercase().starts_with(&buffer.to_lowercase())
-                {
-                    Some(label[buffer.len()..].to_string())
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
+        let mut spans = Vec::new();
+        let ghost_suffix = self.ghost_suffix_text();
 
         if is_slash_command {
             let input_lower = buffer.to_lowercase();
@@ -423,10 +472,7 @@ impl InputArea {
         } else if !buffer.is_empty() {
             spans.push(Span::styled(buffer.clone(), Style::default().fg(TEXT)));
             if let Some(suffix) = &ghost_suffix {
-                spans.push(Span::styled(
-                    suffix.clone(),
-                    Style::default().fg(TEXT_DIM),
-                ));
+                spans.push(Span::styled(suffix.clone(), Style::default().fg(TEXT_DIM)));
             }
         } else if !self.context_suggestions.is_empty() {
             let hints: Vec<String> = self
@@ -441,7 +487,7 @@ impl InputArea {
             ));
         } else {
             spans.push(Span::styled(
-                " Type a message... (/help for commands)",
+                " ▸ Type a message... (/help for commands)",
                 Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
             ));
         }
@@ -449,17 +495,19 @@ impl InputArea {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Input ")
-            .border_style(Style::default().fg(if is_slash_command { YELLOW } else { TEXT_DIM }));
+            .border_style(Style::default().fg(if is_slash_command { CYAN } else { TEXT_DIM }));
 
         let paragraph = Paragraph::new(Line::from(spans))
             .block(block)
+            .wrap(Wrap { trim: false })
             .style(Style::default().bg(BG));
         frame.render_widget(paragraph, area);
 
-        let text_before_cursor = &self.buffer[..self.cursor_pos];
-        let cursor_col = text_before_cursor.width() as u16 + 1;
-        if cursor_col < area.width - 1 {
-            frame.set_cursor_position((area.x + cursor_col, area.y + 1));
+        let (cursor_line, cursor_col) = self.cursor_line_col(content_width);
+        let cursor_y = area.y + 1 + cursor_line;
+        let cursor_x = area.x + 1 + cursor_col;
+        if cursor_y < area.y + area.height - 1 && cursor_x < area.x + area.width - 1 {
+            frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
 }

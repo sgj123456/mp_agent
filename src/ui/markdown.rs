@@ -14,12 +14,7 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
             Line::from(
                 line.spans
                     .into_iter()
-                    .map(|span| {
-                        Span::styled(
-                            span.content.to_string(),
-                            span.style,
-                        )
-                    })
+                    .map(|span| Span::styled(span.content.to_string(), span.style))
                     .collect::<Vec<_>>(),
             )
         })

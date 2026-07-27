@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use super::{
     ACCENT, BG, CYAN, DIFF_ADD, DIFF_HEADER, DIFF_REMOVE, GREEN, RED, TEXT, TEXT_DIM, YELLOW,
@@ -121,27 +121,27 @@ impl ChatArea {
             let mut lines = vec![Self::card_header(&format!("edit_file — {}", path), YELLOW)];
             let border = Style::default().fg(TEXT_DIM).add_modifier(Modifier::DIM);
             lines.push(Line::from(Span::styled(
-                "  ┌─ remove ────────────────────",
+                "  ── remove ──────────────────",
                 border,
             )));
             for line in old_s.lines() {
                 lines.push(Line::from(Span::styled(
-                    format!("  │ {}", line),
+                    format!("  ▍ {}", line),
                     Style::default().fg(DIFF_REMOVE),
                 )));
             }
             lines.push(Line::from(Span::styled(
-                "  ├─ add ───────────────────────",
+                "  ── add ─────────────────────",
                 border,
             )));
             for line in new_s.lines() {
                 lines.push(Line::from(Span::styled(
-                    format!("  │ {}", line),
+                    format!("  ▍ {}", line),
                     Style::default().fg(DIFF_ADD),
                 )));
             }
             lines.push(Line::from(Span::styled(
-                "  └────────────────────────────",
+                "  ────────────────────────────",
                 border,
             )));
             lines
@@ -178,39 +178,39 @@ impl ChatArea {
         if is_diff {
             let dim = Style::default().fg(TEXT_DIM).add_modifier(Modifier::DIM);
             lines.push(Line::from(Span::styled(
-                "  ┌─ diff ────────────────────────",
+                "  ── diff ─────────────────────",
                 dim,
             )));
             for line in result_lines.iter().take(shown) {
                 if line.starts_with("--- ") || line.starts_with("+++ ") {
                     lines.push(Line::from(Span::styled(
-                        format!("  │{}", line),
+                        format!("  ▍{}", line),
                         Style::default().fg(DIFF_HEADER),
                     )));
                 } else if line.starts_with("@@ ") {
                     lines.push(Line::from(Span::styled(
-                        format!("  │{}", line),
+                        format!("  ▍{}", line),
                         Style::default().fg(TEXT_DIM),
                     )));
                 } else if line.starts_with('-') {
                     lines.push(Line::from(Span::styled(
-                        format!("  │{}", line),
+                        format!("  ▍{}", line),
                         Style::default().fg(DIFF_REMOVE),
                     )));
                 } else if line.starts_with('+') {
                     lines.push(Line::from(Span::styled(
-                        format!("  │{}", line),
+                        format!("  ▍{}", line),
                         Style::default().fg(DIFF_ADD),
                     )));
                 } else {
                     lines.push(Line::from(Span::styled(
-                        format!("  │{}", line),
+                        format!("  ▍{}", line),
                         Style::default().fg(TEXT_DIM),
                     )));
                 }
             }
             lines.push(Line::from(Span::styled(
-                "  └────────────────────────────",
+                "  ────────────────────────────",
                 dim,
             )));
         } else if is_error {
@@ -225,7 +225,7 @@ impl ChatArea {
         if is_folded {
             let remaining = total - fold_threshold;
             lines.push(Line::from(Span::styled(
-                format!("  … {} lines folded (click to expand)", remaining),
+                format!("  ··· {} more lines (click to expand) ···", remaining),
                 Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
             )));
         }
@@ -321,7 +321,7 @@ impl ChatArea {
 
     fn card_header(name: &str, fg: Color) -> Line<'static> {
         Line::from(vec![
-            Span::styled(" ── ", Style::default().fg(fg).add_modifier(Modifier::BOLD)),
+            Span::styled("▌ ", Style::default().fg(fg).add_modifier(Modifier::BOLD)),
             Span::styled(
                 name.to_string(),
                 Style::default().fg(fg).add_modifier(Modifier::BOLD),
@@ -336,10 +336,7 @@ impl ChatArea {
             style = style.add_modifier(Modifier::DIM);
         }
         Line::from(vec![
-            Span::styled(
-                " │ ",
-                Style::default().fg(color).add_modifier(Modifier::DIM),
-            ),
+            Span::styled("  ", Style::default().fg(color).add_modifier(Modifier::DIM)),
             Span::styled(content.to_string(), style),
         ])
     }
@@ -416,19 +413,11 @@ impl ChatArea {
     }
 
     fn render_lines(&mut self, frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
-        let total = lines.len();
         let paragraph = Paragraph::new(lines)
             .scroll((self.scroll_offset, 0))
+            .wrap(Wrap { trim: false })
             .style(Style::default().bg(BG));
         frame.render_widget(paragraph, area);
-        let mut state = ScrollbarState::new(total).position(self.scroll_offset as usize);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓")),
-            area,
-            &mut state,
-        );
     }
 
     pub fn render_with_preview(&mut self, frame: &mut Frame, area: Rect, preview: &str) {

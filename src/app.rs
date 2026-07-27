@@ -512,10 +512,9 @@ impl App {
             match event {
                 AgentEvent::Token(token) => {
                     self.streaming_buffer.push_str(&token);
-                    let spinner = spinner_char(self.frame_count);
                     self.status_message = format!(
-                        " {} Streaming... {} tokens",
-                        spinner, self.token_usage_session
+                        "Streaming... {} tokens",
+                        self.token_usage_session
                     );
                 }
                 AgentEvent::MessageComplete(text) => {
@@ -611,12 +610,16 @@ impl App {
             frame.render_widget(Clear, area);
             frame.render_widget(Paragraph::new("").style(Style::default().bg(BG)), area);
 
+            let input_content_width = area.width.saturating_sub(2);
+            let input_wrapped = self.input.wrapped_height(input_content_width);
+            let input_height = input_wrapped.saturating_add(2).clamp(3, 10);
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(5),    // Chat area
-                    Constraint::Length(3), // Input area
-                    Constraint::Length(1), // Status bar
+                    Constraint::Min(5),              // Chat area
+                    Constraint::Length(input_height), // Input area
+                    Constraint::Length(1),            // Status bar
                 ])
                 .split(area);
 
@@ -641,11 +644,11 @@ impl App {
                 let scroll = self.chat.scroll_offset() as usize;
                 let visible_start = start.saturating_sub(scroll);
                 let visible_end = end.saturating_sub(scroll);
-                if visible_start < chat_area.height as usize {
+                if visible_start < chat_area.height as usize && chat_area.height > 0 {
                     let row_start = (chat_area.y + visible_start as u16)
-                        .min(chat_area.y + chat_area.height - 1);
-                    let row_end = (chat_area.y + visible_end as u16)
-                        .min(chat_area.y + chat_area.height - 1);
+                        .min(chat_area.y + chat_area.height.saturating_sub(1));
+                    let row_end =
+                        (chat_area.y + visible_end as u16).min(chat_area.y + chat_area.height.saturating_sub(1));
                     let highlight_height = row_end.saturating_sub(row_start) + 1;
                     if highlight_height > 0 {
                         let highlight_area = Rect {
@@ -663,6 +666,35 @@ impl App {
 
             self.input.render(frame, input_area);
 
+            // Render the suggestion overlay on top of the input area if there
+            // are any matching slash commands or context suggestions. Only
+            // shown when no pending choice panel is active (the two overlays
+            // would conflict).
+            //
+            // The panel is rendered as an overlay on the upper portion of the
+            // input area (anchored to the top of the input box and floating
+            // downward) so the command / tab-completion panel is actually
+            // visible — the alternative (rendering below the input box) would
+            // place the panel inside the status bar area which is only 1 line
+            // tall. Using Clear ensures the panel is not obscured by the chat
+            // content behind it.
+            if self.pending_choice.is_empty() && self.input.get_input().starts_with('/') {
+                let matches = self.input.matching_commands();
+                if !matches.is_empty() {
+                    let suggestion_height = (matches.len() as u16 + 2).clamp(3, 10);
+                    let suggested_y = input_area.y.saturating_sub(suggestion_height);
+                    let available = input_area.y + input_area.height - suggested_y;
+                    let suggestion_area = Rect {
+                        x: input_area.x,
+                        y: suggested_y,
+                        width: input_area.width,
+                        height: suggestion_height.min(available),
+                    };
+                    frame.render_widget(Clear, suggestion_area);
+                    self.input.render_suggestions(frame, suggestion_area);
+                }
+            }
+
             if !self.pending_choice.is_empty() {
                 // Render a dedicated choice panel that overlays the chat area.
                 // The topmost pending choice is shown; if there are multiple,
@@ -673,7 +705,7 @@ impl App {
                 let custom_buffer = &current.input_buffer;
 
                 let panel_width = chat_area.width.saturating_sub(4);
-                let panel_height = (n as u16 + 4).min(chat_area.height - 2);
+                let panel_height = (n as u16 + 4).min(chat_area.height.saturating_sub(2));
                 let panel_x = chat_area.x + 2;
                 let panel_y = chat_area.y + 1;
                 let panel_area = Rect {
@@ -686,9 +718,12 @@ impl App {
                 let mut lines = Vec::new();
                 // Title bar
                 let title = if self.pending_choice.len() > 1 {
-                    format!("【Choice】({} pending) Pick an approach:", self.pending_choice.len())
+                    format!(
+                        "▌ Choice ({} pending) — Pick an approach:",
+                        self.pending_choice.len()
+                    )
                 } else {
-                    "【Choice】Pick an approach:".to_string()
+                    "▌ Pick an approach:".to_string()
                 };
                 lines.push(Line::from(Span::styled(
                     title,
@@ -699,12 +734,15 @@ impl App {
                 // Option list with selection highlight
                 for (i, choice) in current.choices.iter().enumerate() {
                     let is_selected = i == selected;
-                    let prefix = if is_selected { "▶ " } else { "  " };
+                    let prefix = if is_selected { "  ▸ " } else { "    " };
                     let num = i + 1;
                     let style = if is_selected {
-                        Style::default().fg(BG).bg(CYAN).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(BG)
+                            .bg(CYAN)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(TEXT).bg(SURFACE)
+                        Style::default().fg(TEXT)
                     };
                     lines.push(Line::from(Span::styled(
                         format!("{}{}. {}", prefix, num, choice),
@@ -736,10 +774,12 @@ impl App {
 
                 let widget = Paragraph::new(lines)
                     .style(Style::default().bg(SURFACE).fg(TEXT))
-                    .block(ratatui::widgets::Block::default()
-                        .borders(ratatui::widgets::Borders::ALL)
-                        .title(" Choice ")
-                        .border_style(Style::default().fg(CYAN)));
+                    .block(
+                        ratatui::widgets::Block::default()
+                            .borders(ratatui::widgets::Borders::ALL)
+                            .title(" Choice ")
+                            .border_style(Style::default().fg(CYAN)),
+                    );
                 frame.render_widget(widget, panel_area);
             } else if let Some(ref pending) = self.pending_permission {
                 let op = crate::permission::op_label(&pending.request.op);
@@ -762,14 +802,14 @@ impl App {
             } else {
                 let symbol = if self.processing {
                     let spinner = spinner_char(self.frame_count);
-                    format!(" {} Processing", spinner)
+                    format!("{} ", spinner)
                 } else {
                     String::new()
                 };
 
                 let status_text = format!(
-                    " mp_agent | {} tools | {} {}",
-                    self.tool_count, self.status_message, symbol
+                    "▌  mp_agent  │  {} tools  │  {}{}",
+                    self.tool_count, symbol, self.status_message
                 );
                 let status = Paragraph::new(Line::from(Span::styled(
                     status_text.trim(),

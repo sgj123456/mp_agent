@@ -176,7 +176,10 @@ impl Agent {
     }
 
     pub async fn send_message(&mut self, user_message: &str) -> String {
-        tracing::info!("Processing message, history length: {}", self.messages.len());
+        tracing::info!(
+            "Processing message, history length: {}",
+            self.messages.len()
+        );
         self.messages.push(ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text(user_message.to_string()),
@@ -223,12 +226,15 @@ impl Agent {
             } = parsed;
 
             if tool_calls.is_empty() {
-                if !content.is_empty() {
-                    full_response = content.clone();
+                let stripped = extract_answer(&content);
+                let final_text = stripped.unwrap_or(content.clone());
+
+                if !final_text.is_empty() {
+                    full_response = final_text.clone();
                     self.messages.push(ChatCompletionRequestMessage::Assistant(
                         ChatCompletionRequestAssistantMessage {
                             content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                content,
+                                final_text,
                             )),
                             ..Default::default()
                         },
@@ -568,6 +574,18 @@ impl Agent {
             )
         }
     }
+}
+
+/// Extract content from `<answer>...</answer>` tags if present.
+/// Returns `Some(text)` with the tags stripped, or `None` if no tags found.
+fn extract_answer(content: &str) -> Option<String> {
+    let start = content.find("<answer>")?;
+    let end = content.rfind("</answer>")?;
+    let inner_start = start + "<answer>".len();
+    if inner_start >= end {
+        return Some(String::new());
+    }
+    Some(content[inner_start..end].trim().to_string())
 }
 
 fn fix_response_value(value: &mut Value) {
