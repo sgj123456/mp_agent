@@ -241,7 +241,7 @@ pub async fn parse_stream(
                                 if let Some(ref name) = func.name
                                     && !name.is_empty()
                                 {
-                                    tracing::info!("func.name: {}", name);
+                                    tracing::trace!("func.name: {}", name);
                                     tool_calls[idx].name = name.clone();
                                 }
                                 if let Some(ref args) = func.arguments {
@@ -250,7 +250,6 @@ pub async fn parse_stream(
                             }
                         }
                     }
-                    tracing::info!("tool_calls: {:?}", tool_calls);
                     if choice.finish_reason.is_some() {
                         break;
                     }

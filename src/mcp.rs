@@ -71,6 +71,7 @@ impl McpManager {
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
+        tracing::info!("MCP call: {}", name);
         for conn in self.connections.values() {
             if conn.tools.iter().any(|t| t.name.as_ref() == name) {
                 let params = CallToolRequestParam {

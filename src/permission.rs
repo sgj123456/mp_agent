@@ -30,7 +30,7 @@ pub fn needs_permission(
     tool_name: &str,
     args: &serde_json::Value,
 ) -> Option<(PermissionOp, String)> {
-    match tool_name {
+    let r = match tool_name {
         "write_file" | "edit_file" => {
             let path = args.get("path").and_then(|v| v.as_str())?;
             Some((PermissionOp::Write, path.to_string()))
@@ -40,7 +40,11 @@ pub fn needs_permission(
             Some((PermissionOp::Execute, format!("bash: {}", cmd)))
         }
         _ => None,
+    };
+    if let Some((ref op, ref target)) = r {
+        tracing::debug!("Permission needed: {:?} on {}", op, target);
     }
+    r
 }
 
 pub fn op_label(op: &PermissionOp) -> &'static str {

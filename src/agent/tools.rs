@@ -260,6 +260,7 @@ fn present_choices_tool() -> Value {
 }
 
 pub async fn execute_native_tool(name: &str, args: &Value) -> String {
+    tracing::debug!("Tool call: {}", name);
     match name {
         "bash" => execute_bash(args).await,
         "read_file" => execute_read_file(args).await,

@@ -70,6 +70,9 @@ pub struct App {
     /// Cached plain-text lines of the chat content, used for extracting
     /// selected text during drag-to-select copying.
     chat_plain_lines: Vec<String>,
+    /// Persistent clipboard handle so clipboard managers on Linux have time
+    /// to read the contents (avoid "dropped very quickly" warnings).
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
@@ -110,6 +113,7 @@ impl App {
             selection: None,
             left_button_down: false,
             chat_plain_lines: Vec::new(),
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 
@@ -273,50 +277,38 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 self.left_button_down = true;
-                // Preserve the original click-to-fold behaviour (single click
-                // on a tool-result header toggles expand/collapse).
-                let chat_area_top = 1;
                 let row = mouse.row as usize;
-                if row > chat_area_top {
-                    let relative_row = row - chat_area_top;
-                    let scroll = self.chat.scroll_offset() as usize;
-                    let click_line = scroll + relative_row;
-                    self.chat.toggle_fold_at_line(click_line);
-                }
-                // Also start a new selection at the clicked position so that
-                // dragging will select text.
-                if row > chat_area_top {
-                    let relative_row = row - chat_area_top;
-                    let scroll = self.chat.scroll_offset() as usize;
-                    let click_line = scroll + relative_row;
-                    self.selection = Some(SelectionRange {
-                        start_line: click_line,
-                        end_line: click_line,
-                    });
-                }
+                let scroll = self.chat.scroll_offset() as usize;
+                let click_line = scroll + row;
+                self.chat.toggle_fold_at_line(click_line);
+                self.selection = Some(SelectionRange {
+                    start_line: click_line,
+                    end_line: click_line,
+                });
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                // Extend the selection if the left button is held down.
                 if self.left_button_down {
-                    let chat_area_top = 1;
                     let row = mouse.row as usize;
-                    if row > chat_area_top {
-                        let relative_row = row - chat_area_top;
-                        let scroll = self.chat.scroll_offset() as usize;
-                        let click_line = scroll + relative_row;
-                        if let Some(ref mut sel) = self.selection {
-                            sel.end_line = click_line;
-                        }
+                    let scroll = self.chat.scroll_offset() as usize;
+                    let click_line = scroll + row;
+                    if let Some(ref mut sel) = self.selection {
+                        sel.end_line = click_line;
                     }
                 }
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.left_button_down = false;
-                // On release, if there is a selection, copy the text to the clipboard.
                 if let Some(sel) = self.selection {
                     let text = extract_selection_text(self, sel);
                     if !text.is_empty() {
-                        let _ = copy_to_clipboard(&text);
+                        if let Some(ref mut cb) = self.clipboard {
+                            if let Err(e) = cb.set_text(text) {
+                                tracing::error!("Clipboard error: {}", e);
+                                self.status_message = format!("Clipboard error: {}", e);
+                            }
+                        } else {
+                            self.status_message = "Clipboard not available".to_string();
+                        }
                     }
                 }
                 self.selection = None;
@@ -591,32 +583,18 @@ impl App {
             frame.render_widget(Clear, area);
             frame.render_widget(Paragraph::new("").style(Style::default().bg(BG)), area);
 
-            let sugg_count = self.input.suggestion_count() as u16;
-            let sugg_height = if sugg_count > 0 { sugg_count + 2 } else { 0 };
-
-            let mut constraints = vec![Constraint::Min(5)];
-            if sugg_height > 0 {
-                constraints.push(Constraint::Length(sugg_height));
-            }
-            constraints.push(Constraint::Length(3));
-            constraints.push(Constraint::Length(1));
-
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(constraints)
+                .constraints([
+                    Constraint::Min(5),    // Chat area
+                    Constraint::Length(3), // Input area
+                    Constraint::Length(1), // Status bar
+                ])
                 .split(area);
 
             let chat_area = chunks[0];
-            let input_area = if sugg_height > 0 {
-                chunks[2]
-            } else {
-                chunks[1]
-            };
-            let status_area = if sugg_height > 0 {
-                chunks[3]
-            } else {
-                chunks[2]
-            };
+            let input_area = chunks[1];
+            let status_area = chunks[2];
 
             if !self.streaming_buffer.is_empty() {
                 self.chat
@@ -629,22 +607,17 @@ impl App {
             // mouse-selection handler can extract the selected text.
             self.chat_plain_lines = self.chat.plain_text_lines();
 
-            // Render a highlight overlay over the currently selected region.
             if let Some(sel) = self.selection {
                 let start = sel.start_line.min(sel.end_line);
                 let end = sel.start_line.max(sel.end_line);
-                // Convert to row indices within the visible chat area.
-                // The chat area starts at row 1 (row 0 is the top border/edge).
                 let scroll = self.chat.scroll_offset() as usize;
                 let visible_start = start.saturating_sub(scroll);
                 let visible_end = end.saturating_sub(scroll);
                 if visible_start < chat_area.height as usize {
-                    // Clamp to visible chat area rows.
-                    let row_start = (chat_area.y + 1 + visible_start as u16)
+                    let row_start = (chat_area.y + visible_start as u16)
                         .min(chat_area.y + chat_area.height - 1);
-                    let row_end = (chat_area.y + 1 + visible_end as u16)
+                    let row_end = (chat_area.y + visible_end as u16)
                         .min(chat_area.y + chat_area.height - 1);
-                    // Render a highlight overlay over the selected region.
                     let highlight_height = row_end.saturating_sub(row_start) + 1;
                     if highlight_height > 0 {
                         let highlight_area = Rect {
@@ -658,10 +631,6 @@ impl App {
                         frame.render_widget(highlight, highlight_area);
                     }
                 }
-            }
-
-            if sugg_height > 0 {
-                self.input.render_suggestions(frame, chunks[1]);
             }
 
             self.input.render(frame, input_area);
@@ -770,18 +739,6 @@ fn dirname(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// Copy a text string to the system clipboard. Returns Ok(()) on success
-/// or an error message if the clipboard is not available.
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    use arboard::Clipboard;
-    match Clipboard::new() {
-        Ok(mut clipboard) => clipboard
-            .set_text(text.to_string())
-            .map_err(|e| format!("Failed to set clipboard: {}", e)),
-        Err(e) => Err(format!("Could not open clipboard: {}", e)),
-    }
-}
-
 /// Extract the plain text covered by the selection range from the cached
 /// chat plain-text lines. Returns the selected text as a single string.
 fn extract_selection_text(app: &App, range: SelectionRange) -> String {
@@ -790,8 +747,6 @@ fn extract_selection_text(app: &App, range: SelectionRange) -> String {
     }
     let start = range.start_line.min(range.end_line);
     let end = range.start_line.max(range.end_line);
-    let start = start.saturating_sub(1); // chat area has a top offset line
-    let end = end.saturating_sub(1);
     if start >= app.chat_plain_lines.len() {
         return String::new();
     }

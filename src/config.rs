@@ -26,6 +26,8 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok());
 
+        tracing::info!("Config loaded: model={}, base_url={}, max_tokens={:?}", model, base_url, max_tokens);
+
         Ok(Config {
             api_key,
             base_url,

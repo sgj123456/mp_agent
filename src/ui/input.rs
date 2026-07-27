@@ -16,10 +16,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/history", "Show command history"),
 ];
 
-/// A suggestion item that can be displayed in the input suggestion panel.
-/// Slash commands are static, while context suggestions are dynamically
-/// extracted from the chat history (e.g. file paths, commands, todo text).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum SuggestionItem {
     SlashCommand(&'static str, &'static str),
     Context(String),
@@ -29,14 +26,14 @@ impl SuggestionItem {
     pub fn label(&self) -> String {
         match self {
             SuggestionItem::SlashCommand(cmd, _) => cmd.to_string(),
-            SuggestionItem::Context(text) => text.clone(),
+            SuggestionItem::Context(s) => s.clone(),
         }
     }
 
     pub fn description(&self) -> String {
         match self {
             SuggestionItem::SlashCommand(_, desc) => desc.to_string(),
-            SuggestionItem::Context(_) => "From context".to_string(),
+            SuggestionItem::Context(_) => String::new(),
         }
     }
 
@@ -51,10 +48,11 @@ pub struct InputArea {
     history: Vec<String>,
     history_pos: Option<usize>,
     tab_suggestion: Option<String>,
+    /// Index of the currently selected suggestion in the filtered list.
     suggestion_cursor: Option<usize>,
-    /// Dynamic suggestions derived from chat context (file paths, commands,
-    /// todo descriptions, etc.) shown alongside slash commands when the
-    /// input is empty or starts with a partial match.
+    /// Dynamic suggestions extracted from chat context (file paths, commands,
+    /// todo descriptions, etc.) used for tab-completion when the input is
+    /// non-empty and does not start with '/'.
     context_suggestions: Vec<SuggestionItem>,
 }
 
@@ -75,7 +73,6 @@ impl InputArea {
         self.buffer.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
         self.tab_suggestion = None;
-        self.suggestion_cursor = None;
     }
 
     pub fn delete_char(&mut self) {
@@ -89,7 +86,6 @@ impl InputArea {
             self.cursor_pos = prev;
         }
         self.tab_suggestion = None;
-        self.suggestion_cursor = None;
     }
 
     pub fn clear(&mut self) {
@@ -100,14 +96,12 @@ impl InputArea {
         self.cursor_pos = 0;
         self.history_pos = None;
         self.tab_suggestion = None;
-        self.suggestion_cursor = None;
     }
 
     /// Set the dynamic context suggestions extracted from chat history.
     pub fn set_context_suggestions(&mut self, suggestions: Vec<SuggestionItem>) {
         self.context_suggestions = suggestions;
-        // Don't reset suggestion_cursor on context update; the user may be
-        // navigating and we want the list to stay stable.
+        self.suggestion_cursor = None;
     }
 
     /// Clear all dynamic context suggestions.
@@ -391,12 +385,24 @@ impl InputArea {
         let buffer = &self.buffer;
         let is_slash_command = buffer.starts_with('/');
 
-        if buffer.is_empty() {
-            spans.push(Span::styled(
-                " Type a message... (/help for commands)",
-                Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
-            ));
-        } else if is_slash_command {
+        // Find ghost suffix: for non-slash input with partial text, show the
+        // remainder of the first matching suggestion in dim style.
+        let ghost_suffix = if !buffer.is_empty() && !is_slash_command {
+            self.matching_commands().first().and_then(|item| {
+                let label = item.label();
+                if label.len() > buffer.len()
+                    && label.to_lowercase().starts_with(&buffer.to_lowercase())
+                {
+                    Some(label[buffer.len()..].to_string())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        if is_slash_command {
             let input_lower = buffer.to_lowercase();
             let matched = SLASH_COMMANDS.iter().any(|(cmd, _)| cmd == &input_lower);
 
@@ -414,8 +420,30 @@ impl InputArea {
                     Style::default().fg(TEXT),
                 ));
             }
-        } else {
+        } else if !buffer.is_empty() {
             spans.push(Span::styled(buffer.clone(), Style::default().fg(TEXT)));
+            if let Some(suffix) = &ghost_suffix {
+                spans.push(Span::styled(
+                    suffix.clone(),
+                    Style::default().fg(TEXT_DIM),
+                ));
+            }
+        } else if !self.context_suggestions.is_empty() {
+            let hints: Vec<String> = self
+                .context_suggestions
+                .iter()
+                .take(3)
+                .map(|s| s.label())
+                .collect();
+            spans.push(Span::styled(
+                hints.join("  ·  "),
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
+            ));
+        } else {
+            spans.push(Span::styled(
+                " Type a message... (/help for commands)",
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
+            ));
         }
 
         let block = Block::default()

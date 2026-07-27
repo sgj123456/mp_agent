@@ -176,6 +176,7 @@ impl Agent {
     }
 
     pub async fn send_message(&mut self, user_message: &str) -> String {
+        tracing::info!("Processing message, history length: {}", self.messages.len());
         self.messages.push(ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessage {
                 content: ChatCompletionRequestUserMessageContent::Text(user_message.to_string()),
@@ -184,7 +185,7 @@ impl Agent {
         ));
 
         let mut full_response = String::new();
-        let max_iterations = 100;
+        let max_iterations = 500;
 
         for _iteration in 0..max_iterations {
             let _ = self.event_tx.send(AgentEvent::Status("Thinking...".into()));
@@ -264,6 +265,7 @@ impl Agent {
         tool_calls: Vec<ToolCallState>,
         content_buffer: &str,
     ) -> Result<(), String> {
+        tracing::info!("Executing {} tool call(s)", tool_calls.len());
         // Push assistant message with tool calls
         {
             let assistant_tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
