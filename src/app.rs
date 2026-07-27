@@ -14,7 +14,7 @@ use crate::mcp::McpManager;
 use crate::permission::{PermissionDecision, PermissionRequest, PermissionRule, match_rule};
 use crate::ui::chat::{ChatArea, ChatMessage};
 use crate::ui::input::{InputArea, SuggestionItem};
-use crate::ui::{BG, CYAN, SURFACE, TEXT, YELLOW};
+use crate::ui::{BG, CYAN, SURFACE, TEXT, TEXT_DIM, YELLOW};
 
 /// Represents a selected text range within the chat area.
 /// `start_line` and `end_line` are absolute line indices (including all messages).
@@ -36,6 +36,7 @@ struct PendingPermission {
 
 struct PendingChoice {
     choices: Vec<String>,
+    selected: usize,
     input_buffer: String,
     respond: oneshot::Sender<ChoiceResult>,
 }
@@ -55,7 +56,7 @@ pub struct App {
     frame_count: u64,
     last_model: String,
     pending_permission: Option<PendingPermission>,
-    pending_choice: Option<PendingChoice>,
+    pending_choice: Vec<PendingChoice>,
     permission_rules: Vec<PermissionRule>,
     token_usage_total: u64,
     token_usage_session: u64,
@@ -105,7 +106,7 @@ impl App {
             frame_count: 0,
             last_model,
             pending_permission: None,
-            pending_choice: None,
+            pending_choice: Vec::new(),
             permission_rules: Vec::new(),
             token_usage_total: 0,
             token_usage_session: 0,
@@ -118,7 +119,7 @@ impl App {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
-        if self.pending_choice.is_some() {
+        if !self.pending_choice.is_empty() {
             let handled = self.handle_choice_key(&key);
             if handled {
                 return;
@@ -324,24 +325,49 @@ impl App {
     }
 
     fn handle_choice_key(&mut self, key: &KeyEvent) -> bool {
-        let Some(choice) = self.pending_choice.as_ref() else {
+        // Work on the topmost pending choice (most recent).
+        let count = self.pending_choice.len();
+        if count == 0 {
             return false;
-        };
-        let count = choice.choices.len();
+        }
+        let current = self.pending_choice.last_mut().unwrap();
+        let n_choices = current.choices.len();
 
         match key.code {
+            KeyCode::Enter => {
+                let selected = current.selected;
+                let custom = if current.input_buffer.is_empty() {
+                    None
+                } else {
+                    Some(current.input_buffer.clone())
+                };
+                let pending = self.pending_choice.remove(count - 1);
+                let _ = pending.respond.send(ChoiceResult {
+                    selected_index: selected,
+                    custom_text: custom,
+                });
+                true
+            }
+            KeyCode::Esc => {
+                let pending = self.pending_choice.remove(count - 1);
+                let _ = pending.respond.send(ChoiceResult {
+                    selected_index: 0,
+                    custom_text: Some("User cancelled the choice".to_string()),
+                });
+                true
+            }
             KeyCode::Char(d) if d.is_ascii_digit() => {
                 let n = d.to_digit(10).unwrap_or(0) as usize;
-                if n >= 1 && n <= count {
-                    let pending = self.pending_choice.take().unwrap();
+                if n >= 1 && n <= n_choices {
+                    let pending = self.pending_choice.remove(count - 1);
                     let _ = pending.respond.send(ChoiceResult {
                         selected_index: n - 1,
                         custom_text: None,
                     });
                     return true;
                 }
-                if n == 0 && count < 10 {
-                    let pending = self.pending_choice.take().unwrap();
+                if n == 0 && n_choices < 10 {
+                    let pending = self.pending_choice.remove(count - 1);
                     let _ = pending.respond.send(ChoiceResult {
                         selected_index: 0,
                         custom_text: None,
@@ -350,41 +376,42 @@ impl App {
                 }
                 false
             }
+            KeyCode::Up => {
+                if current.selected > 0 {
+                    current.selected -= 1;
+                    current.input_buffer.clear();
+                }
+                true
+            }
+            KeyCode::Down => {
+                if current.selected < n_choices - 1 {
+                    current.selected += 1;
+                    current.input_buffer.clear();
+                }
+                true
+            }
             KeyCode::Char('c') | KeyCode::Char('C') => {
-                if let Some(choice) = self.pending_choice.as_mut() {
-                    match key.modifiers {
-                        m if m.is_empty() => {
-                            let custom = choice.input_buffer.clone();
-                            let pending = self.pending_choice.take().unwrap();
-                            let _ = pending.respond.send(ChoiceResult {
-                                selected_index: count,
-                                custom_text: Some(custom),
-                            });
-                            return true;
-                        }
-                        _ => {}
-                    }
+                if key.modifiers.is_empty() {
+                    // Press 'c' to submit a custom approach.
+                    let custom = current.input_buffer.clone();
+                    let selected = current.selected;
+                    let pending = self.pending_choice.remove(count - 1);
+                    let _ = pending.respond.send(ChoiceResult {
+                        selected_index: selected,
+                        custom_text: Some(custom),
+                    });
+                    return true;
                 }
                 false
             }
             KeyCode::Char(ch) => {
-                if let Some(choice) = self.pending_choice.as_mut() {
-                    choice.input_buffer.push(ch);
+                if key.modifiers.is_empty() {
+                    current.input_buffer.push(ch);
                 }
                 true
             }
             KeyCode::Backspace => {
-                if let Some(choice) = self.pending_choice.as_mut() {
-                    choice.input_buffer.pop();
-                }
-                true
-            }
-            KeyCode::Esc => {
-                let pending = self.pending_choice.take().unwrap();
-                let _ = pending.respond.send(ChoiceResult {
-                    selected_index: 0,
-                    custom_text: Some("User cancelled the choice".to_string()),
-                });
+                current.input_buffer.pop();
                 true
             }
             _ => true,
@@ -536,8 +563,9 @@ impl App {
                     }
                 }
                 AgentEvent::ChoiceRequired { choices, respond } => {
-                    self.pending_choice = Some(PendingChoice {
+                    self.pending_choice.push(PendingChoice {
                         choices,
+                        selected: 0,
                         input_buffer: String::new(),
                         respond,
                     });
@@ -635,48 +663,84 @@ impl App {
 
             self.input.render(frame, input_area);
 
-            if let Some(ref choice) = self.pending_choice {
-                let options: Vec<String> = choice
-                    .choices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("  {}. {}", i + 1, c))
-                    .collect();
-                let custom_hint = if choice.input_buffer.is_empty() {
-                    " or type your custom approach below"
+            if !self.pending_choice.is_empty() {
+                // Render a dedicated choice panel that overlays the chat area.
+                // The topmost pending choice is shown; if there are multiple,
+                // a small indicator shows the queue depth.
+                let current = self.pending_choice.last().unwrap();
+                let n = current.choices.len();
+                let selected = current.selected;
+                let custom_buffer = &current.input_buffer;
+
+                let panel_width = chat_area.width.saturating_sub(4);
+                let panel_height = (n as u16 + 4).min(chat_area.height - 2);
+                let panel_x = chat_area.x + 2;
+                let panel_y = chat_area.y + 1;
+                let panel_area = Rect {
+                    x: panel_x,
+                    y: panel_y,
+                    width: panel_width,
+                    height: panel_height,
+                };
+
+                let mut lines = Vec::new();
+                // Title bar
+                let title = if self.pending_choice.len() > 1 {
+                    format!("【Choice】({} pending) Pick an approach:", self.pending_choice.len())
                 } else {
-                    ""
+                    "【Choice】Pick an approach:".to_string()
                 };
-                let choice_text = format!(
-                    "【Choice】Pick an option (1-{}){}: {}",
-                    choice.choices.len(),
-                    custom_hint,
-                    choice.input_buffer
-                );
-                let height = (choice.choices.len() as u16 + 3).min(12);
-                let choice_area = Rect {
-                    x: status_area.x,
-                    y: status_area.y.saturating_sub(height.saturating_sub(1)),
-                    width: status_area.width,
-                    height,
-                };
-                let mut choice_lines = Vec::new();
-                for opt in &options {
-                    choice_lines.push(Line::from(Span::styled(
-                        opt.clone(),
-                        Style::default().fg(CYAN),
+                lines.push(Line::from(Span::styled(
+                    title,
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+
+                // Option list with selection highlight
+                for (i, choice) in current.choices.iter().enumerate() {
+                    let is_selected = i == selected;
+                    let prefix = if is_selected { "▶ " } else { "  " };
+                    let num = i + 1;
+                    let style = if is_selected {
+                        Style::default().fg(BG).bg(CYAN).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(TEXT).bg(SURFACE)
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{}. {}", prefix, num, choice),
+                        style,
                     )));
                 }
-                choice_lines.push(Line::from(""));
-                choice_lines.push(Line::from(Span::styled(
-                    choice_text,
-                    Style::default()
-                        .fg(YELLOW)
-                        .bg(SURFACE)
-                        .add_modifier(Modifier::BOLD),
+                lines.push(Line::from(""));
+
+                // Custom input line
+                let custom_prompt = if custom_buffer.is_empty() {
+                    "  Type custom approach or press [c] to confirm custom…"
+                } else {
+                    &format!("  Custom: {}", custom_buffer)
+                };
+                lines.push(Line::from(Span::styled(
+                    custom_prompt,
+                    Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
                 )));
-                let widget = Paragraph::new(choice_lines).style(Style::default().bg(BG));
-                frame.render_widget(widget, choice_area);
+
+                // Hint line
+                let hint = format!(
+                    "  [↑↓] navigate  [1-{}] select  [Enter] confirm  [Esc] cancel  [c] custom",
+                    n
+                );
+                lines.push(Line::from(Span::styled(
+                    hint,
+                    Style::default().fg(TEXT_DIM),
+                )));
+
+                let widget = Paragraph::new(lines)
+                    .style(Style::default().bg(SURFACE).fg(TEXT))
+                    .block(ratatui::widgets::Block::default()
+                        .borders(ratatui::widgets::Borders::ALL)
+                        .title(" Choice ")
+                        .border_style(Style::default().fg(CYAN)));
+                frame.render_widget(widget, panel_area);
             } else if let Some(ref pending) = self.pending_permission {
                 let op = crate::permission::op_label(&pending.request.op);
                 let path = &pending.request.path;
