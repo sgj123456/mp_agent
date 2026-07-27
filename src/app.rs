@@ -49,6 +49,12 @@ pub struct App {
     pending_permission: Option<PendingPermission>,
     pending_choice: Option<PendingChoice>,
     permission_rules: Vec<PermissionRule>,
+    token_usage_total: u64,
+    token_usage_session: u64,
+    /// Message queue for user inputs arriving while the agent is processing.
+    /// Inputs typed during processing are buffered and sent sequentially once
+    /// the current turn is done.
+    pending_messages: Vec<String>,
 }
 
 impl App {
@@ -83,6 +89,9 @@ impl App {
             pending_permission: None,
             pending_choice: None,
             permission_rules: Vec::new(),
+            token_usage_total: 0,
+            token_usage_session: 0,
+            pending_messages: Vec::new(),
         }
     }
 
@@ -132,6 +141,7 @@ impl App {
             if self.processing {
                 self.processing = false;
                 self.streaming_buffer.clear();
+                self.pending_messages.clear();
                 self.status_message = "Cancelled".to_string();
                 return;
             }
@@ -155,7 +165,9 @@ impl App {
                     _ => {}
                 }
             }
-            return;
+            // Allow the user to type into the input area while the agent is
+            // processing; the message will be queued when Enter is pressed.
+            // Don't return early — fall through to the key handling below.
         }
 
         match key.code {
@@ -170,12 +182,22 @@ impl App {
                     if input.starts_with('/') {
                         self.handle_slash_command(&input);
                     } else {
-                        self.processing = true;
-                        self.streaming_buffer.clear();
-                        self.status_message = "Processing...".to_string();
-                        self.chat.add_message(ChatMessage::User(input.clone()));
-                        self.input.clear();
-                        let _ = self.cmd_tx.send(AgentCommand::SendMessage(input));
+                        if self.processing {
+                            // Agent is still processing; buffer the message for later.
+                            self.pending_messages.push(input.clone());
+                            self.input.clear();
+                            self.status_message = format!(
+                                "Processing... ({} queued)",
+                                self.pending_messages.len()
+                            );
+                        } else {
+                            self.processing = true;
+                            self.streaming_buffer.clear();
+                            self.status_message = "Processing...".to_string();
+                            self.chat.add_message(ChatMessage::User(input.clone()));
+                            self.input.clear();
+                            let _ = self.cmd_tx.send(AgentCommand::SendMessage(input));
+                        }
                     }
                 } else {
                     self.input.clear();
@@ -345,6 +367,11 @@ impl App {
                      - `Ctrl+L` - Clear chat\n\
                      - `Tab` - Auto-complete slash commands\n\
                      - `↑/↓` - Input history / Scroll chat\n\n\
+                     **Streaming Input:**\n\
+                     You can type and press Enter while the agent is thinking. Your\n\
+                     messages are queued and sent automatically in order once the\n\
+                     current response is complete. Press Esc to cancel processing\n\
+                     and clear any queued messages.\n\n\
                      **Markdown Support:**\n\
                      Assistant messages support **bold**, *italic*, `code`, \
                      ```code blocks```, headers, lists, and blockquotes.",
@@ -404,15 +431,17 @@ impl App {
             match event {
                 AgentEvent::Token(token) => {
                     self.streaming_buffer.push_str(&token);
-                    let len = self.streaming_buffer.len();
                     let spinner = spinner_char(self.frame_count);
-                    self.status_message = format!(" {} Streaming... {} chars", spinner, len);
+                    self.status_message = format!(
+                        " {} Streaming... {} tokens",
+                        spinner, self.token_usage_session
+                    );
                 }
                 AgentEvent::MessageComplete(text) => {
                     self.chat.add_message(ChatMessage::Assistant(text));
                     self.streaming_buffer.clear();
                     self.processing = false;
-                    self.status_message = "Ready".to_string();
+                    self.drain_pending_messages();
                 }
                 AgentEvent::ToolCallStart { name, args } => {
                     self.chat.add_message(ChatMessage::ToolCall { name, args });
@@ -428,7 +457,7 @@ impl App {
                         self.streaming_buffer.clear();
                     }
                     self.processing = false;
-                    self.status_message = "Ready".to_string();
+                    self.drain_pending_messages();
                 }
                 AgentEvent::Error(msg) => {
                     self.chat.add_message(ChatMessage::Error(msg));
@@ -455,8 +484,34 @@ impl App {
                         respond,
                     });
                 }
+                AgentEvent::TokenUsage { prompt, completion } => {
+                    self.token_usage_total += prompt + completion;
+                    self.token_usage_session += prompt + completion;
+                }
             }
         }
+    }
+
+    /// Drain the pending message queue: if there are any user inputs that were
+    /// buffered while the agent was processing, send the first one to the agent
+    /// now that the current turn is complete. The user will no longer be blocked
+    /// from typing and the queued messages flow naturally into the conversation.
+    fn drain_pending_messages(&mut self) {
+        if self.pending_messages.is_empty() {
+            self.status_message = "Ready".to_string();
+            return;
+        }
+        let next = self.pending_messages.remove(0);
+        self.processing = true;
+        self.streaming_buffer.clear();
+        let queued = self.pending_messages.len();
+        self.status_message = if queued > 0 {
+            format!("Processing... ({} queued)", queued)
+        } else {
+            "Processing...".to_string()
+        };
+        self.chat.add_message(ChatMessage::User(next.clone()));
+        let _ = self.cmd_tx.send(AgentCommand::SendMessage(next));
     }
 
     pub fn draw(

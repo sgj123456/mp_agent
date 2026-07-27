@@ -7,18 +7,18 @@ mod error;
 mod mcp;
 #[allow(dead_code)]
 mod permission;
-#[allow(dead_code)]
 mod ui;
 
 use std::io;
 use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::event::{self, Event};
+use crossterm::event::{Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -80,24 +80,39 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    // Use crossterm's async EventStream so input events are delivered
+    // immediately without blocking on poll(). This eliminates the perceived
+    // latency for both keyboard and mouse (wheel) input.
+    let mut events = EventStream::new();
+
     loop {
+        // Process any pending agent events first so the UI reflects the latest
+        // state before we redraw.
+        app.process_agent_events();
+
+        // Draw the current frame.
         app.draw(terminal)?;
 
-        if event::poll(Duration::from_millis(16))? {
-            match event::read()? {
-                Event::Key(key) => app.handle_key_event(key),
-                Event::Mouse(mouse) => app.handle_mouse_event(mouse),
-                _ => {}
+        // Wait for the next input event with a short timeout so we still make
+        // progress when no input arrives (e.g. for streaming updates). The
+        // timeout is only a fallback; events are delivered instantly otherwise.
+        tokio::select! {
+            Some(Ok(event)) = events.next() => {
+                match event {
+                    Event::Key(key) => app.handle_key_event(key),
+                    Event::Mouse(mouse) => app.handle_mouse_event(mouse),
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                // No input arrived within the window; just continue the loop
+                // so the streaming buffer and status keep refreshing.
             }
         }
-
-        app.process_agent_events();
 
         if !app.running {
             break;
         }
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     Ok(())

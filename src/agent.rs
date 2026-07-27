@@ -26,6 +26,10 @@ pub enum AgentEvent {
     Done,
     Error(String),
     Status(String),
+    TokenUsage {
+        prompt: u64,
+        completion: u64,
+    },
     PermissionRequired {
         request: PermissionRequest,
         respond: oneshot::Sender<PermissionDecision>,
@@ -180,7 +184,7 @@ impl Agent {
         ));
 
         let mut full_response = String::new();
-        let max_iterations = 20;
+        let max_iterations = 100;
 
         for _iteration in 0..max_iterations {
             let _ = self.event_tx.send(AgentEvent::Status("Thinking...".into()));
@@ -213,28 +217,10 @@ impl Agent {
             };
 
             let ParsedStream {
-                mut content,
+                content,
                 tool_calls,
             } = parsed;
 
-            // Extract and forward token usage events as AgentEvent::Token
-            // (parse_stream interleaves them into content_buffer; we split them out)
-            let token_events: Vec<String> = content
-                .split("\n\n--- Tokens: ")
-                .skip(1)
-                .map(|s| {
-                    let end = s.find(" ---\n").unwrap_or(s.len());
-                    format!("--- Tokens: {}", &s[..end])
-                })
-                .collect();
-            for token_event in &token_events {
-                let _ = self.event_tx.send(AgentEvent::Token(token_event.clone()));
-            }
-
-            // Remove the token event markers from the actual content
-            for marker in &token_events {
-                content = content.replace(marker, "");
-            }
             if tool_calls.is_empty() {
                 if !content.is_empty() {
                     full_response = content.clone();

@@ -197,17 +197,15 @@ pub async fn parse_stream(
                         .get("completion_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    let total = usage
-                        .get("total_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    // Note: usage events are emitted by the caller via AgentEvent::Token,
-                    // since the parser has no access to the event channel.
-                    // The raw usage text is accumulated in content_buffer for reference.
-                    content_buffer.push_str(&format!(
-                        "\n\n--- Tokens: {} prompt + {} completion = {} total ---\n",
-                        prompt, completion, total
-                    ));
+                    // Emit the usage event directly from the parser.
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(AgentEvent::TokenUsage {
+                            prompt,
+                            completion,
+                        });
+                    }
+                    // Don't pollute the content stream with usage text.
+                    continue;
                 }
 
                 let stream_chunk: CreateChatCompletionStreamResponse =

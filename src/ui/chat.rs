@@ -1,4 +1,7 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use ratatui::Frame;
@@ -11,6 +14,68 @@ use super::{
     ACCENT, BG, CYAN, DIFF_ADD, DIFF_HEADER, DIFF_REMOVE, GREEN, RED, TEXT, TEXT_DIM, YELLOW,
     markdown,
 };
+
+/// Simple LRU cache for markdown rendering results.
+/// Avoids re-parsing the same assistant/system messages on every frame.
+struct MarkdownCache {
+    entries: Vec<(u64, Vec<Line<'static>>)>,
+}
+
+impl MarkdownCache {
+    fn new(capacity: usize) -> Self {
+        MarkdownCache {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn get(&mut self, text: &str) -> Option<Vec<Line<'static>>> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let key = hasher.finish();
+
+        for i in (0..self.entries.len()).rev() {
+            if self.entries[i].0 == key {
+                return Some(self.entries.remove(i).1);
+            }
+        }
+        None
+    }
+
+    fn put(&mut self, text: &str, lines: Vec<Line<'static>>) {
+        const CAPACITY: usize = 64;
+        if self.entries.len() >= CAPACITY {
+            self.entries.remove(0);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let key = hasher.finish();
+        self.entries.push((key, lines));
+    }
+}
+
+/// Global markdown cache shared across the application.
+static MARKDOWN_CACHE: LazyLock<std::sync::Mutex<RefCell<MarkdownCache>>> =
+    LazyLock::new(|| std::sync::Mutex::new(RefCell::new(MarkdownCache::new(64))));
+
+fn render_markdown_cached(text: &str) -> Vec<Line<'static>> {
+    if text.is_empty() {
+        return vec![Line::from("")];
+    }
+    {
+        let cache = MARKDOWN_CACHE.lock().unwrap();
+        let mut cache_ref = cache.borrow_mut();
+        if let Some(cached) = cache_ref.get(text) {
+            return cached;
+        }
+    }
+    let rendered = markdown::render_markdown(text);
+    {
+        let cache = MARKDOWN_CACHE.lock().unwrap();
+        let mut cache_ref = cache.borrow_mut();
+        cache_ref.put(text, rendered.clone());
+    }
+    rendered
+}
 
 #[derive(Debug, Clone)]
 pub enum ChatMessage {
@@ -137,7 +202,7 @@ impl ChatArea {
         match msg {
             ChatMessage::User(text) => text.lines().count() + 2,
             ChatMessage::Assistant(text) => {
-                let rendered = markdown::render_markdown(text);
+                let rendered = render_markdown_cached(text);
                 // header + rendered content lines + trailing empty
                 rendered.len() + 2
             }
@@ -177,7 +242,7 @@ impl ChatArea {
             }
             ChatMessage::Error(text) => text.lines().count() + 2,
             ChatMessage::System(text) => {
-                let rendered = markdown::render_markdown(text);
+                let rendered = render_markdown_cached(text);
                 rendered.len() + 2
             }
         }
@@ -251,7 +316,7 @@ impl ChatArea {
                 }
                 ChatMessage::Assistant(text) => {
                     lines.push(Self::card_header("Assistant", CYAN));
-                    let rendered = markdown::render_markdown(text);
+                    let rendered = render_markdown_cached(text);
                     for line in Self::wrap_markdown_lines(rendered, CYAN) {
                         lines.push(line);
                     }
