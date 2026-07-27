@@ -1,15 +1,13 @@
+pub mod request;
 pub mod skill;
 pub mod tools;
 
-use async_openai::Client;
-use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::*;
-use eventsource_stream::EventStream;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::request::{ParsedStream, ToolCallState, parse_stream, send_request};
 use crate::config::Config;
 use crate::permission::{PermissionDecision, PermissionOp, PermissionRequest};
 
@@ -127,9 +125,7 @@ struct TodoUpdate {
     priority: Option<TodoPriority>,
 }
 
-#[allow(dead_code)]
 pub struct Agent {
-    client: Client<OpenAIConfig>,
     http_client: reqwest::Client,
     config: Config,
     messages: Vec<ChatCompletionRequestMessage>,
@@ -144,12 +140,6 @@ impl Agent {
         system_prompt: String,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Self {
-        let openai_config = OpenAIConfig::new()
-            .with_api_key(&config.api_key)
-            .with_api_base(&config.base_url);
-
-        let client = Client::with_config(openai_config);
-
         let messages = vec![ChatCompletionRequestMessage::System(
             ChatCompletionRequestSystemMessage {
                 content: ChatCompletionRequestSystemMessageContent::Text(system_prompt.clone()),
@@ -158,7 +148,6 @@ impl Agent {
         )];
 
         Agent {
-            client,
             http_client: reqwest::Client::new(),
             config,
             messages,
@@ -197,285 +186,82 @@ impl Agent {
             let _ = self.event_tx.send(AgentEvent::Status("Thinking...".into()));
 
             let tools = self.get_tools();
-            let mut request = CreateChatCompletionRequestArgs::default()
-                .model(&self.config.model)
-                .messages(self.messages.clone())
-                .tools(tools)
-                .stream(true)
-                .build()
-                .unwrap();
 
-            if let Some(max_tokens) = self.config.max_tokens {
-                request.max_completion_tokens = Some(max_tokens);
-            }
-
-            let url = format!("{}/chat/completions", self.config.base_url);
-            let http_response = self
-                .http_client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.config.api_key))
-                .json(&request)
-                .send()
-                .await;
-
-            match http_response {
-                Ok(response) => {
-                    if !response.status().is_success() {
-                        let status = response.status();
-                        let body = response.text().await.unwrap_or_default();
-                        let error_msg = format!("API error: HTTP {} - {}", status, body);
-                        let _ = self.event_tx.send(AgentEvent::Error(error_msg.clone()));
-                        let _ = self.event_tx.send(AgentEvent::Done);
-                        return error_msg;
-                    }
-
-                    let mut content_buffer = String::new();
-                    let mut tool_calls: Vec<ToolCallState> = Vec::new();
-                    let byte_stream = response
-                        .bytes_stream()
-                        .map(|r| r.map_err(std::io::Error::other));
-                    let mut event_stream = std::pin::pin!(EventStream::new(byte_stream));
-
-                    loop {
-                        let timeout_dur = if content_buffer.is_empty() {
-                            std::time::Duration::from_secs(30)
-                        } else {
-                            std::time::Duration::from_secs(8)
-                        };
-
-                        let event_result =
-                            match tokio::time::timeout(timeout_dur, event_stream.next()).await {
-                                Ok(result) => result,
-                                Err(_) => {
-                                    tracing::warn!("Stream idle timeout reached, ending stream");
-                                    break;
-                                }
-                            };
-
-                        match event_result {
-                            Some(Ok(event)) => {
-                                // tracing::info!("data: {}", event.data);
-                                if event.data.trim() == "[DONE]" {
-                                    break;
-                                }
-                                if event.event == "keepalive" {
-                                    continue;
-                                }
-
-                                let mut value: Value = match serde_json::from_str(&event.data) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        tracing::warn!("Failed to parse chunk JSON: {}", e);
-                                        continue;
-                                    }
-                                };
-
-                                fix_response_value(&mut value);
-
-                                if let Some(usage) = value.get("usage") {
-                                    let prompt = usage
-                                        .get("prompt_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    let completion = usage
-                                        .get("completion_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    let total = usage
-                                        .get("total_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    let _ = self.event_tx.send(AgentEvent::Token(
-                                        format!("\n\n--- Tokens: {} prompt + {} completion = {} total ---\n",
-                                            prompt, completion, total)
-                                    ));
-                                }
-
-                                let response: CreateChatCompletionStreamResponse =
-                                    match serde_json::from_value(value) {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            tracing::warn!("Failed to deserialize chunk: {}", e);
-                                            continue;
-                                        }
-                                    };
-
-                                if let Some(choice) = response.choices.first() {
-                                    tracing::info!("choice: {:?}", choice);
-                                    tracing::info!("choice.delta: {:#?}", choice.delta);
-                                    let delta = &choice.delta;
-
-                                    if let Some(ref text) = delta.content {
-                                        content_buffer.push_str(text);
-                                        let _ = self.event_tx.send(AgentEvent::Token(text.clone()));
-                                    }
-
-                                    if let Some(ref tool_call_deltas) = delta.tool_calls {
-                                        for tc_delta in tool_call_deltas {
-                                            let idx = tc_delta.index as usize;
-
-                                            while tool_calls.len() <= idx {
-                                                tool_calls.push(ToolCallState {
-                                                    id: String::new(),
-                                                    name: String::new(),
-                                                    arguments: String::new(),
-                                                });
-                                            }
-
-                                            if let Some(ref id) = tc_delta.id
-                                                && !id.is_empty()
-                                            {
-                                                tool_calls[idx].id = id.clone();
-                                            }
-                                            if let Some(ref func) = tc_delta.function {
-                                                if let Some(ref name) = func.name
-                                                    && !name.is_empty()
-                                                {
-                                                    tracing::info!("func.name: {}", name);
-                                                    tool_calls[idx].name = name.clone();
-                                                }
-                                                if let Some(ref args) = func.arguments {
-                                                    tool_calls[idx].arguments.push_str(args);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    tracing::info!("tool_calls: {:?}", tool_calls);
-                                    if choice.finish_reason.is_some() {
-                                        break;
-                                    }
-                                }
-                            }
-                            Some(Err(e)) => {
-                                let _ = self
-                                    .event_tx
-                                    .send(AgentEvent::Error(format!("Stream error: {}", e)));
-                                return full_response;
-                            }
-                            None => {
-                                break;
-                            }
-                        }
-                    }
-                    // If we have tool calls, execute them and continue
-                    if !tool_calls.is_empty() && !tool_calls.iter().any(|tc| tc.name.is_empty()) {
-                        let assistant_tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
-                            .iter()
-                            .map(|tc| {
-                                ChatCompletionMessageToolCalls::Function(
-                                    ChatCompletionMessageToolCall {
-                                        id: tc.id.clone(),
-                                        function: FunctionCall {
-                                            name: tc.name.clone(),
-                                            arguments: tc.arguments.clone(),
-                                        },
-                                    },
-                                )
-                            })
-                            .collect();
-
-                        self.messages.push(ChatCompletionRequestMessage::Assistant(
-                            ChatCompletionRequestAssistantMessage {
-                                content: if content_buffer.is_empty() {
-                                    None
-                                } else {
-                                    Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                        content_buffer.clone(),
-                                    ))
-                                },
-                                tool_calls: Some(assistant_tool_calls),
-                                ..Default::default()
-                            },
-                        ));
-
-                        for tc in &tool_calls {
-                            if tc.name.is_empty() {
-                                continue;
-                            }
-                            tracing::info!("tc.name: {}", tc.name);
-
-                            let _ = self.event_tx.send(AgentEvent::ToolCallStart {
-                                name: tc.name.clone(),
-                                args: tc.arguments.clone(),
-                            });
-
-                            let args: Value =
-                                serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
-
-                            let start = std::time::Instant::now();
-
-                            let result = match tc.name.as_str() {
-                                "add_todo" | "update_todo" | "list_todos" | "remove_todo" => {
-                                    self.execute_todo_tool(&tc.name, &args).await
-                                }
-                                "present_choices" => self.execute_choices_tool(&args).await,
-                                _ => {
-                                    if let Some((op, path)) =
-                                        crate::permission::needs_permission(&tc.name, &args)
-                                    {
-                                        let decision =
-                                            self.request_permission(op, &path, &tc.name).await;
-                                        if decision == PermissionDecision::Deny {
-                                            format!("⛔ Permission denied: {} on {}", tc.name, path)
-                                        } else {
-                                            tools::execute_native_tool(&tc.name, &args).await
-                                        }
-                                    } else {
-                                        tools::execute_native_tool(&tc.name, &args).await
-                                    }
-                                }
-                            };
-
-                            let elapsed = start.elapsed();
-                            let elapsed_secs = elapsed.as_secs_f64();
-
-                            let display_result = if elapsed_secs >= 1.0 {
-                                format!("[{:.1}s] {}", elapsed_secs, result)
-                            } else {
-                                format!("[{:.0}ms] {}", elapsed_secs * 1000.0, result)
-                            };
-
-                            let _ = self.event_tx.send(AgentEvent::ToolCallResult {
-                                name: tc.name.clone(),
-                                result: display_result,
-                            });
-
-                            self.messages.push(ChatCompletionRequestMessage::Tool(
-                                ChatCompletionRequestToolMessage {
-                                    content: ChatCompletionRequestToolMessageContent::Text(result),
-                                    tool_call_id: tc.id.clone(),
-                                },
-                            ));
-                        }
-
-                        continue;
-                    }
-
-                    if !content_buffer.is_empty() {
-                        full_response = content_buffer.clone();
-                        self.messages.push(ChatCompletionRequestMessage::Assistant(
-                            ChatCompletionRequestAssistantMessage {
-                                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                    content_buffer,
-                                )),
-                                ..Default::default()
-                            },
-                        ));
-                    }
-
-                    let _ = self
-                        .event_tx
-                        .send(AgentEvent::MessageComplete(full_response.clone()));
-                    let _ = self.event_tx.send(AgentEvent::Done);
-                    return full_response;
-                }
+            let http_resp = match send_request(
+                &self.config,
+                self.messages.clone(),
+                tools,
+                &self.http_client,
+            )
+            .await
+            {
+                Ok(resp) => resp,
                 Err(e) => {
-                    let error_msg = format!("API error: {}", e);
-                    let _ = self.event_tx.send(AgentEvent::Error(error_msg.clone()));
+                    let _ = self.event_tx.send(AgentEvent::Error(e.clone()));
                     let _ = self.event_tx.send(AgentEvent::Done);
-                    return error_msg;
+                    return e;
                 }
+            };
+
+            let parsed = match parse_stream(http_resp, Some(self.event_tx.clone())).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = self.event_tx.send(AgentEvent::Error(e.clone()));
+                    let _ = self.event_tx.send(AgentEvent::Done);
+                    return e;
+                }
+            };
+
+            let ParsedStream {
+                mut content,
+                tool_calls,
+            } = parsed;
+
+            // Extract and forward token usage events as AgentEvent::Token
+            // (parse_stream interleaves them into content_buffer; we split them out)
+            let token_events: Vec<String> = content
+                .split("\n\n--- Tokens: ")
+                .skip(1)
+                .map(|s| {
+                    let end = s.find(" ---\n").unwrap_or(s.len());
+                    format!("--- Tokens: {}", &s[..end])
+                })
+                .collect();
+            for token_event in &token_events {
+                let _ = self.event_tx.send(AgentEvent::Token(token_event.clone()));
             }
+
+            // Remove the token event markers from the actual content
+            for marker in &token_events {
+                content = content.replace(marker, "");
+            }
+            if tool_calls.is_empty() {
+                if !content.is_empty() {
+                    full_response = content.clone();
+                    self.messages.push(ChatCompletionRequestMessage::Assistant(
+                        ChatCompletionRequestAssistantMessage {
+                            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                                content,
+                            )),
+                            ..Default::default()
+                        },
+                    ));
+                }
+
+                let _ = self
+                    .event_tx
+                    .send(AgentEvent::MessageComplete(full_response.clone()));
+                let _ = self.event_tx.send(AgentEvent::Done);
+                return full_response;
+            }
+
+            if let Err(e) = self.handle_tool_calls(tool_calls, &content).await {
+                let _ = self.event_tx.send(AgentEvent::Error(e.clone()));
+                let _ = self.event_tx.send(AgentEvent::Done);
+                return e;
+            }
+
+            continue;
         }
 
         let _ = self
@@ -483,6 +269,140 @@ impl Agent {
             .send(AgentEvent::Status("Max iterations reached".into()));
         let _ = self.event_tx.send(AgentEvent::Done);
         full_response
+    }
+
+    /// Build assistant and tool-call messages from parsed tool calls,
+    /// execute each tool, and push the results as tool messages.
+    async fn handle_tool_calls(
+        &mut self,
+        tool_calls: Vec<ToolCallState>,
+        content_buffer: &str,
+    ) -> Result<(), String> {
+        // Push assistant message with tool calls
+        {
+            let assistant_tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
+                .iter()
+                .map(|tc| {
+                    ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
+                        id: tc.id.clone(),
+                        function: FunctionCall {
+                            name: if tc.name.is_empty() {
+                                "unknown".to_string()
+                            } else {
+                                tc.name.clone()
+                            },
+                            arguments: tc.arguments.clone(),
+                        },
+                    })
+                })
+                .collect();
+
+            self.messages.push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: if content_buffer.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionRequestAssistantMessageContent::Text(
+                            content_buffer.to_string(),
+                        ))
+                    },
+                    tool_calls: Some(assistant_tool_calls),
+                    ..Default::default()
+                },
+            ));
+        }
+
+        for tc in &tool_calls {
+            if tc.name.is_empty() {
+                let _ = self.event_tx.send(AgentEvent::ToolCallStart {
+                    name: "(incomplete)".into(),
+                    args: tc.arguments.clone(),
+                });
+                let error_msg =
+                    "Error: tool call stream ended before tool name was received".to_string();
+                let _ = self.event_tx.send(AgentEvent::ToolCallResult {
+                    name: "(incomplete)".into(),
+                    result: error_msg.clone(),
+                });
+                self.messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(error_msg),
+                        tool_call_id: tc.id.clone(),
+                    },
+                ));
+                continue;
+            }
+
+            let _ = self.event_tx.send(AgentEvent::ToolCallStart {
+                name: tc.name.clone(),
+                args: tc.arguments.clone(),
+            });
+
+            let args: Value = match serde_json::from_str(&tc.arguments) {
+                Ok(v) => v,
+                Err(e) => {
+                    let error_msg = format!(
+                        "Error: failed to parse tool arguments for '{}': {}",
+                        tc.name, e
+                    );
+                    let _ = self.event_tx.send(AgentEvent::ToolCallResult {
+                        name: tc.name.clone(),
+                        result: error_msg.clone(),
+                    });
+                    self.messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(error_msg),
+                            tool_call_id: tc.id.clone(),
+                        },
+                    ));
+                    continue;
+                }
+            };
+
+            let start = std::time::Instant::now();
+
+            let result = match tc.name.as_str() {
+                "add_todo" | "update_todo" | "list_todos" | "remove_todo" => {
+                    self.execute_todo_tool(&tc.name, &args).await
+                }
+                "present_choices" => self.execute_choices_tool(&args).await,
+                _ => {
+                    if let Some((op, path)) = crate::permission::needs_permission(&tc.name, &args) {
+                        let decision = self.request_permission(op, &path, &tc.name).await;
+                        if decision == PermissionDecision::Deny {
+                            format!("⛔ Permission denied: {} on {}", tc.name, path)
+                        } else {
+                            tools::execute_native_tool(&tc.name, &args).await
+                        }
+                    } else {
+                        tools::execute_native_tool(&tc.name, &args).await
+                    }
+                }
+            };
+
+            let elapsed = start.elapsed();
+            let elapsed_secs = elapsed.as_secs_f64();
+
+            let display_result = if elapsed_secs >= 1.0 {
+                format!("[{:.1}s] {}", elapsed_secs, result)
+            } else {
+                format!("[{:.0}ms] {}", elapsed_secs * 1000.0, result)
+            };
+
+            let _ = self.event_tx.send(AgentEvent::ToolCallResult {
+                name: tc.name.clone(),
+                result: display_result,
+            });
+
+            self.messages.push(ChatCompletionRequestMessage::Tool(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(result),
+                    tool_call_id: tc.id.clone(),
+                },
+            ));
+        }
+
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -694,9 +614,8 @@ fn fix_response_value(value: &mut Value) {
     }
 }
 
-#[derive(Debug)]
-struct ToolCallState {
-    id: String,
-    name: String,
-    arguments: String,
+fn should_retry_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
 }

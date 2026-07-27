@@ -577,7 +577,7 @@ fn safe_truncate_old(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
 
