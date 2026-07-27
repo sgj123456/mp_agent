@@ -7,7 +7,7 @@ edition = "2024"
 tokio = { version = "1", features = ["full"] }
 async-openai = { version = "0.41", features = ["chat-completion"] }
 rmcp = { version = "0.8", features = ["client", "transport-io", "transport-child-process"] }
-ratatui = "0.29"
+ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
 dotenvy = "0.15"
 color-eyre = "0.6"
@@ -21,7 +21,7 @@ futures = "0.3"
 dirs = "6"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 eventsource-stream = "0.2"
-pulldown-cmark = "0.13"
+tui-markdown = "0.2"
 unicode-width = "0.2"
 
 [dev-dependencies]

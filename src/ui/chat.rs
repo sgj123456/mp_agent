@@ -374,11 +374,7 @@ impl ChatArea {
     }
 
     fn build_lines(&mut self, preview: Option<&str>) -> Vec<Line<'static>> {
-        if preview.is_some() {
-            self.dirty = true;
-        }
-
-        if !self.dirty {
+        if preview.is_none() && !self.dirty {
             if let Some(ref cached) = self.compiled_output {
                 return cached.clone();
             }
@@ -402,7 +398,9 @@ impl ChatArea {
             }
         }
 
-        self.compiled_output = Some(lines.clone());
+        if preview.is_none() {
+            self.compiled_output = Some(lines.clone());
+        }
         self.dirty = false;
         lines
     }
