@@ -1,26 +1,104 @@
-use rmcp::model::{CallToolRequestParam, Tool as McpTool};
-use rmcp::service::{RoleClient, RunningService, ServiceExt};
-use rmcp::transport::TokioChildProcess;
-use serde_json::{Value, json};
+use rmcp::model::Tool as McpTool;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+/// Configuration for a single MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: HashMap<String, McpServerConfig>,
+}
+
+impl McpConfig {
+    pub fn from_file(path: &str) -> Result<Self, String> {
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read MCP config {}: {}", path, e))?;
+        let config: McpConfig =
+            serde_json::from_str(&contents).map_err(|e| format!("Failed to parse MCP config: {}", e))?;
+        Ok(config)
+    }
+
+    pub fn server_config(&self, name: &str) -> Option<&McpServerConfig> {
+        self.servers.get(name).filter(|cfg| cfg.enabled)
+    }
+}
 
 pub struct McpManager {
     connections: HashMap<String, McpConnection>,
+    config: McpConfig,
 }
 
 struct McpConnection {
-    service: RunningService<RoleClient, ()>,
     server_name: String,
     tools: Vec<McpTool>,
+    child: Arc<Mutex<tokio::process::Child>>,
 }
 
 impl McpManager {
     pub fn new() -> Self {
         McpManager {
             connections: HashMap::new(),
+            config: McpConfig {
+                servers: HashMap::new(),
+            },
         }
+    }
+
+    pub fn from_config(path: &str) -> Result<Self, String> {
+        let config = McpConfig::from_file(path)?;
+        Ok(McpManager {
+            connections: HashMap::new(),
+            config,
+        })
+    }
+
+    pub fn config_has_servers(&self) -> bool {
+        !self.config.servers.is_empty()
+    }
+
+    pub async fn connect_all(&mut self) -> Result<(), String> {
+        let server_names: Vec<String> = self.config.servers.keys().cloned().collect();
+        for name in server_names {
+            if let Some(cfg) = self.config.server_config(&name)
+                && let Err(e) = self.connect(name.clone(), cfg.command.clone(), cfg.args.clone()).await
+            {
+                warn!("Failed to connect to MCP server '{}': {}", name, e);
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn connect_servers(&mut self) -> Vec<(String, Result<Vec<McpTool>, String>)> {
+        let mut results = Vec::new();
+        let server_names: Vec<String> = self.config.servers.keys().cloned().collect();
+        for name in server_names {
+            if let Some(cfg) = self.config.server_config(&name) {
+                let result = self.connect(name.clone(), cfg.command.clone(), cfg.args.clone()).await;
+                results.push((name, result));
+            }
+        }
+        results
     }
 
     pub async fn connect(
@@ -29,80 +107,238 @@ impl McpManager {
         command: String,
         args: Vec<String>,
     ) -> Result<Vec<McpTool>, String> {
-        let mut cmd = Command::new(&command);
-        cmd.args(&args);
-        let transport = TokioChildProcess::new(cmd)
+        let mut child = Command::new(&command)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
             .map_err(|e| format!("Failed to spawn MCP server '{}': {}", command, e))?;
 
-        let service = ()
-            .serve(transport)
-            .await
-            .map_err(|e| format!("Failed to start MCP service: {}", e))?;
+        // Perform MCP handshake and list tools
+        let tools = Self::perform_handshake(&mut child).await?;
 
-        let tools = match service.list_tools(None).await {
-            Ok(response) => response.tools,
-            Err(e) => {
-                let _ = service.cancel().await;
-                return Err(format!("Failed to list tools: {}", e));
-            }
-        };
-
-        info!(
-            "Connected to MCP server '{}', found {} tools",
-            name,
-            tools.len()
-        );
+        info!("Connected to MCP server '{}', found {} tools", name, tools.len());
 
         let conn = McpConnection {
-            service,
             server_name: name.clone(),
             tools: tools.clone(),
+            child: Arc::new(Mutex::new(child)),
         };
 
-        self.connections.insert(name, conn);
+        self.connections.insert(name.clone(), conn);
         Ok(tools)
     }
 
+    /// Read lines from stdout until we find one that parses as valid JSON.
+    /// Skips non-JSON lines (e.g. stray log output written to stdout by the server).
+    async fn read_json_line(reader: &mut BufReader<&mut tokio::process::ChildStdout>) -> Result<String, String> {
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.map_err(|e| format!("Read error: {}", e))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if serde_json::from_str::<Value>(trimmed).is_ok() {
+                return Ok(line);
+            }
+            // skip non-JSON line (likely log output)
+            tracing::warn!("skipping non-JSON line from MCP server: {:?}", trimmed);
+        }
+    }
+
+    async fn perform_handshake(child: &mut tokio::process::Child) -> Result<Vec<McpTool>, String> {
+        // Step 1: Initialize
+        let init_request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "mp_agent", "version": "0.1.0" }
+            }
+        });
+        {
+            let stdin = child.stdin.as_mut().ok_or("No stdin")?;
+            let line = serde_json::to_string(&init_request).map_err(|e| e.to_string())?;
+            let mut line = line.into_bytes();
+            line.push(b'\n');
+            stdin.write_all(&line).await.map_err(|e| format!("Write error: {}", e))?;
+        }
+
+        // Read initialize response
+        let response_line = {
+            let stdout = child.stdout.as_mut().ok_or("No stdout")?;
+            let mut reader = BufReader::new(stdout);
+            Self::read_json_line(&mut reader).await?
+        };
+        let response: Value = serde_json::from_str(&response_line).map_err(|e| format!("Parse error: {}", e))?;
+        if let Some(err) = response.get("error") {
+            return Err(format!("Initialize error: {}", err["message"].as_str().unwrap_or("unknown")));
+        }
+
+        // Step 2: Send initialized notification
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        {
+            let stdin = child.stdin.as_mut().ok_or("No stdin")?;
+            let mut line = serde_json::to_string(&notif).map_err(|e| e.to_string())?;
+            line.push('\n');
+            stdin.write_all(line.as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
+        }
+
+        // Step 3: List tools
+        let list_request = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        });
+        {
+            let stdin = child.stdin.as_mut().ok_or("No stdin")?;
+            let mut line = serde_json::to_string(&list_request).map_err(|e| e.to_string())?;
+            line.push('\n');
+            stdin.write_all(line.as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
+        }
+
+        let response_line = {
+            let stdout = child.stdout.as_mut().ok_or("No stdout")?;
+            let mut reader = BufReader::new(stdout);
+            Self::read_json_line(&mut reader).await?
+        };
+        let response: Value = serde_json::from_str(&response_line).map_err(|e| format!("Parse error: {}", e))?;
+        if let Some(err) = response.get("error") {
+            return Err(format!("List tools error: {}", err["message"].as_str().unwrap_or("unknown")));
+        }
+
+        let tools_val = response["result"]["tools"].clone();
+        let mcp_tools: Vec<McpTool> =
+            serde_json::from_value(tools_val).map_err(|e| format!("Tool parse error: {}", e))?;
+
+        Ok(mcp_tools)
+    }
+
     pub fn all_mcp_tools(&self) -> Vec<&McpTool> {
-        self.connections
-            .values()
-            .flat_map(|c| c.tools.iter())
-            .collect()
+        self.connections.values().flat_map(|c| c.tools.iter()).collect()
+    }
+
+    pub fn get_openai_tools(&self) -> Vec<(String, String, Value)> {
+        let mut result = Vec::new();
+        for (server_name, conn) in &self.connections {
+            for tool in &conn.tools {
+                let prefixed_name = format!("{}_{}", server_name, tool.name);
+                let input_schema = mcp_input_schema_to_openai(&tool.input_schema);
+                let def = json!({
+                    "type": "function",
+                    "function": {
+                        "name": prefixed_name,
+                        "description": tool.description.as_deref().unwrap_or("MCP tool"),
+                        "parameters": input_schema
+                    }
+                });
+                result.push((server_name.clone(), tool.name.to_string(), def));
+            }
+        }
+        result
+    }
+
+    pub fn has_prefixed_tool(&self, prefixed_name: &str) -> bool {
+        for (conn_name, conn) in &self.connections {
+            for tool in &conn.tools {
+                let full_name = format!("{}_{}", conn_name, tool.name.as_ref());
+                if full_name == prefixed_name {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub async fn call_prefixed_tool(&self, prefixed_name: &str, args: Value) -> Result<String, String> {
+        for (conn_name, conn) in &self.connections {
+            for tool in &conn.tools {
+                let full_name = format!("{}_{}", conn_name, tool.name);
+                if full_name == prefixed_name {
+                    return self.call_tool_raw(&conn.child, &tool.name, args).await;
+                }
+            }
+        }
+        Err(format!("MCP tool '{}' not found", prefixed_name))
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
-        tracing::info!("MCP call: {}", name);
         for conn in self.connections.values() {
             if conn.tools.iter().any(|t| t.name.as_ref() == name) {
-                let params = CallToolRequestParam {
-                    name: name.to_string().into(),
-                    arguments: serde_json::from_value(args).ok(),
-                };
-
-                let result = conn
-                    .service
-                    .call_tool(params)
-                    .await
-                    .map_err(|e| format!("MCP tool call failed: {}", e))?;
-
-                let mut output = String::new();
-                for item in &result.content {
-                    if let Some(text) = item.as_text() {
-                        output.push_str(&text.text);
-                    }
-                }
-                return Ok(output);
+                return self.call_tool_raw(&conn.child, name, args).await;
             }
         }
-
         Err(format!("MCP tool '{}' not found", name))
     }
 
-    pub async fn disconnect_all(&mut self) {
-        for (name, conn) in self.connections.drain() {
-            if let Err(e) = conn.service.cancel().await {
-                warn!("Error disconnecting from '{}': {}", name, e);
+    async fn call_tool_raw(
+        &self,
+        child_lock: &Arc<Mutex<tokio::process::Child>>,
+        tool_name: &str,
+        args: Value,
+    ) -> Result<String, String> {
+        let mut child = child_lock.lock().await;
+
+        let args_map = match &args {
+            Value::Object(map) => Some(map.clone()),
+            _ => None,
+        };
+
+        let call_request = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": args_map
             }
+        });
+        {
+            let stdin = child.stdin.as_mut().ok_or("No stdin")?;
+            let line = format!("{}\n", serde_json::to_string(&call_request).map_err(|e| e.to_string())?);
+            stdin.write_all(line.as_bytes()).await.map_err(|e| format!("Write error: {}", e))?;
+        }
+
+        let response_line = {
+            let stdout = child.stdout.as_mut().ok_or("No stdout")?;
+            let mut reader = BufReader::new(stdout);
+            Self::read_json_line(&mut reader).await?
+        };
+
+        let response: Value =
+            serde_json::from_str(&response_line).map_err(|e| format!("Parse error: {}", e))?;
+        if let Some(err) = response.get("error") {
+            return Err(format!("Tool call error: {}", err["message"].as_str().unwrap_or("unknown")));
+        }
+
+        // Extract text content from result
+        let content = &response["result"]["content"];
+        let mut output = String::new();
+        if let Some(items) = content.as_array() {
+            for item in items {
+                if item["type"] == "text" {
+                    if let Some(text) = item["text"].as_str() {
+                        output.push_str(text);
+                    }
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    pub async fn disconnect_all(&mut self) {
+        for (_name, conn) in self.connections.drain() {
+            let mut child = conn.child.lock().await;
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
     }
 }
@@ -111,7 +347,7 @@ pub fn mcp_tools_to_openai(mcp_tools: &[McpTool]) -> Vec<Value> {
     mcp_tools
         .iter()
         .map(|tool| {
-            let input_schema = tool.input_schema.as_ref();
+            let input_schema = mcp_input_schema_to_openai(&tool.input_schema);
             json!({
                 "type": "function",
                 "function": {
@@ -122,4 +358,120 @@ pub fn mcp_tools_to_openai(mcp_tools: &[McpTool]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+pub fn mcp_input_schema_to_openai(schema: &Arc<Map<String, Value>>) -> Value {
+    let map: &Map<String, Value> = schema.as_ref();
+    serde_json::to_value(map).unwrap_or_else(|_| json!({}))
+}
+
+pub fn mcp_tools_to_openai_prefixed(server_prefix: &str, mcp_tools: &[McpTool]) -> Vec<Value> {
+    mcp_tools
+        .iter()
+        .map(|tool| {
+            let tool_name = tool.name.as_ref();
+            let prefixed_name = format!("{}_{}", server_prefix, tool_name);
+            let input_schema = mcp_input_schema_to_openai(&tool.input_schema);
+            json!({
+                "type": "function",
+                "function": {
+                    "name": prefixed_name,
+                    "description": tool.description.as_deref().unwrap_or("MCP tool"),
+                    "parameters": input_schema
+                }
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mcp_config_from_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "servers": {
+                    "test": {
+                        "command": "echo",
+                        "args": ["hello"],
+                        "enabled": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = McpConfig::from_file(&path.to_string_lossy()).unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert!(config.servers.contains_key("test"));
+        let srv = config.servers.get("test").unwrap();
+        assert_eq!(srv.command, "echo");
+        assert_eq!(srv.args, vec!["hello"]);
+        assert!(srv.enabled);
+    }
+
+    #[test]
+    fn test_mcp_config_default_disabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "servers": {
+                    "test": {
+                        "command": "echo"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = McpConfig::from_file(&path.to_string_lossy()).unwrap();
+        let srv = config.servers.get("test").unwrap();
+        assert!(srv.enabled);
+    }
+
+    #[test]
+    fn test_mcp_config_server_config_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "servers": {
+                    "on": { "command": "echo", "enabled": true },
+                    "off": { "command": "echo", "enabled": false }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = McpConfig::from_file(&path.to_string_lossy()).unwrap();
+        assert!(config.server_config("on").is_some());
+        assert!(config.server_config("off").is_none());
+    }
+
+    #[test]
+    fn test_mcp_tools_to_openai() {
+        use rmcp::model::Tool;
+        use std::sync::Arc;
+        let tool = Tool {
+            name: "test".into(),
+            title: None,
+            description: Some("test tool".into()),
+            input_schema: Arc::new(serde_json::Map::new()),
+            output_schema: None,
+            annotations: None,
+            icons: None,
+        };
+        let openai = mcp_tools_to_openai(&[tool]);
+        assert_eq!(openai.len(), 1);
+        let func = &openai[0]["function"];
+        assert_eq!(func["name"].as_str().unwrap(), "mcp_test");
+    }
 }

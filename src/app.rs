@@ -26,6 +26,7 @@ pub struct SelectionRange {
 
 pub enum AgentCommand {
     SendMessage(String),
+    ConnectMcp,
     Shutdown,
 }
 
@@ -44,12 +45,11 @@ struct PendingChoice {
 pub struct App {
     chat: ChatArea,
     input: InputArea,
-    #[allow(dead_code)]
-    pub mcp: McpManager,
     pub running: bool,
     processing: bool,
     status_message: String,
     tool_count: usize,
+    mcp_tool_names: Vec<String>,
     streaming_buffer: String,
     cmd_tx: mpsc::UnboundedSender<AgentCommand>,
     event_rx: mpsc::UnboundedReceiver<AgentEvent>,
@@ -77,7 +77,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config) -> Self {
+    pub async fn new(config: Config) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -87,19 +87,42 @@ impl App {
 
         let last_model = config.model.clone();
 
-        let agent = Agent::new(config, system_prompt, event_tx);
-        let mcp = McpManager::new();
+        // Initialize MCP manager from configuration file if present
+        let mcp_manager = if std::path::Path::new("mcp_servers.json").exists() {
+            match McpManager::from_config("mcp_servers.json") {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("Failed to load MCP config: {}", e);
+                    McpManager::new()
+                }
+            }
+        } else {
+            McpManager::new()
+        };
 
+        // Determine if there are any configured MCP servers
+        let has_mcp_servers = mcp_manager.config_has_servers();
+
+        let agent = Agent::new(config, system_prompt, event_tx, mcp_manager);
         tokio::spawn(run_agent_task(agent, cmd_rx));
+
+        // Queue background MCP connection if servers are configured
+        if has_mcp_servers {
+            let _ = cmd_tx.send(AgentCommand::ConnectMcp);
+        }
 
         App {
             chat: ChatArea::new(),
             input: InputArea::new(),
-            mcp,
             running: true,
             processing: false,
-            status_message: "Ready".to_string(),
+            status_message: if has_mcp_servers {
+                "Connecting MCP servers...".to_string()
+            } else {
+                "Ready".to_string()
+            },
             tool_count: crate::agent::tools::native_tool_names().len(),
+            mcp_tool_names: Vec::new(),
             streaming_buffer: String::new(),
             cmd_tx,
             event_rx,
@@ -178,20 +201,18 @@ impl App {
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
         );
 
-        if self.processing {
-            if is_scroll {
-                match key.code {
-                    KeyCode::Up => self.chat.scroll_up(),
-                    KeyCode::Down => self.chat.scroll_down(),
-                    KeyCode::PageUp => self.chat.scroll_page_up(10),
-                    KeyCode::PageDown => self.chat.scroll_page_down(10),
-                    _ => {}
-                }
+        if self.processing && is_scroll {
+            match key.code {
+                KeyCode::Up => self.chat.scroll_up(),
+                KeyCode::Down => self.chat.scroll_down(),
+                KeyCode::PageUp => self.chat.scroll_page_up(10),
+                KeyCode::PageDown => self.chat.scroll_page_down(10),
+                _ => {}
             }
-            // Allow the user to type into the input area while the agent is
-            // processing; the message will be queued when Enter is pressed.
-            // Don't return early — fall through to the key handling below.
         }
+        // Allow the user to type into the input area while the agent is
+        // processing; the message will be queued when Enter is pressed.
+        // Don't return early — fall through to the key handling below.
 
         match key.code {
             KeyCode::Enter => {
@@ -473,10 +494,18 @@ impl App {
                 self.input.clear();
             }
             "/tools" => {
-                let tools = crate::agent::tools::native_tool_names();
-                let mut msg = format!("**Available Tools ({}):**\n", tools.len());
-                for tool in tools {
+                let native_tools = crate::agent::tools::native_tool_names();
+                let total = native_tools.len() + self.mcp_tool_names.len();
+                let mut msg = format!("**Available Tools ({} total):**\n", total);
+                msg.push_str("\n**Native tools:**\n");
+                for tool in native_tools {
                     msg.push_str(&format!("- `{}`\n", tool));
+                }
+                if !self.mcp_tool_names.is_empty() {
+                    msg.push_str("\n**MCP tools:**\n");
+                    for tool in &self.mcp_tool_names {
+                        msg.push_str(&format!("- `{}` (MCP)\n", tool));
+                    }
                 }
                 self.chat.add_message(ChatMessage::System(msg));
                 self.input.clear();
@@ -512,10 +541,8 @@ impl App {
             match event {
                 AgentEvent::Token(token) => {
                     self.streaming_buffer.push_str(&token);
-                    self.status_message = format!(
-                        "Streaming... {} tokens",
-                        self.token_usage_session
-                    );
+                    self.status_message =
+                        format!("Streaming... {} tokens", self.token_usage_session);
                 }
                 AgentEvent::MessageComplete(text) => {
                     self.chat.add_message(ChatMessage::Assistant(text));
@@ -573,6 +600,30 @@ impl App {
                     self.token_usage_total += prompt + completion;
                     self.token_usage_session += prompt + completion;
                 }
+                AgentEvent::McpServerConnected {
+                    server_name,
+                    prefixed_tools,
+                } => {
+                    for tool_name in prefixed_tools {
+                        if !self.mcp_tool_names.contains(&tool_name) {
+                            self.mcp_tool_names.push(tool_name);
+                        }
+                    }
+                    self.tool_count =
+                        crate::agent::tools::native_tool_names().len() + self.mcp_tool_names.len();
+                    self.status_message = format!("MCP '{}' connected", server_name);
+                }
+                AgentEvent::McpServerFailed { server_name, error } => {
+                    self.chat.add_message(ChatMessage::Error(format!(
+                        "MCP server '{}' failed: {}",
+                        server_name, error
+                    )));
+                }
+                AgentEvent::McpConnectionsDone => {
+                    if self.status_message.contains("MCP") {
+                        self.status_message = "Ready".to_string();
+                    }
+                }
             }
         }
     }
@@ -617,7 +668,7 @@ impl App {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(5),              // Chat area
+                    Constraint::Min(5),               // Chat area
                     Constraint::Length(input_height), // Input area
                     Constraint::Length(1),            // Status bar
                 ])
@@ -647,8 +698,8 @@ impl App {
                 if visible_start < chat_area.height as usize && chat_area.height > 0 {
                     let row_start = (chat_area.y + visible_start as u16)
                         .min(chat_area.y + chat_area.height.saturating_sub(1));
-                    let row_end =
-                        (chat_area.y + visible_end as u16).min(chat_area.y + chat_area.height.saturating_sub(1));
+                    let row_end = (chat_area.y + visible_end as u16)
+                        .min(chat_area.y + chat_area.height.saturating_sub(1));
                     let highlight_height = row_end.saturating_sub(row_start) + 1;
                     if highlight_height > 0 {
                         let highlight_area = Rect {
@@ -867,6 +918,9 @@ async fn run_agent_task(mut agent: Agent, mut cmd_rx: mpsc::UnboundedReceiver<Ag
         match cmd {
             AgentCommand::SendMessage(msg) => {
                 agent.send_message(&msg).await;
+            }
+            AgentCommand::ConnectMcp => {
+                agent.connect_mcp_servers().await;
             }
             AgentCommand::Shutdown => {
                 break;

@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "test_mcp": {
+      "command": "./target/debug/test_mcp_server",
+      "args": [],
+      "enabled": true
+    }
+  }
+}

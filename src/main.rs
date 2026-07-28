@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(config);
+    let mut app = App::new(config).await;
 
     let result = run_app(&mut terminal, &mut app).await;
 

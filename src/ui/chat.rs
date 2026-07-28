@@ -25,8 +25,7 @@ pub enum ChatMessage {
 pub struct ChatArea {
     messages: Vec<(ChatMessage, Instant)>,
     rendered_cache: Vec<Vec<Line<'static>>>,
-    compiled_output: Option<Vec<Line<'static>>>,
-    dirty: bool,
+    total_lines_cache: usize,
     scroll_offset: u16,
     auto_scroll: bool,
     area_height: u16,
@@ -38,8 +37,7 @@ impl ChatArea {
         ChatArea {
             messages: Vec::new(),
             rendered_cache: Vec::new(),
-            compiled_output: None,
-            dirty: false,
+            total_lines_cache: 0,
             scroll_offset: 0,
             auto_scroll: true,
             area_height: 20,
@@ -56,9 +54,9 @@ impl ChatArea {
             }
         }
         let rendered = self.render_message(&msg, idx);
+        self.total_lines_cache += rendered.len();
         self.messages.push((msg, Instant::now()));
         self.rendered_cache.push(rendered);
-        self.dirty = true;
         self.scroll_to_bottom();
     }
 
@@ -292,7 +290,7 @@ impl ChatArea {
                         }
                     }
                     self.rendered_cache[idx] = self.render_message(msg, idx);
-                    self.dirty = true;
+                    self.total_lines_cache = self.rendered_cache.iter().map(|c| c.len()).sum();
                 }
                 break;
             }
@@ -301,12 +299,7 @@ impl ChatArea {
     }
 
     fn max_scroll(&self) -> u16 {
-        let total_lines: usize = self
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(i, (m, _))| self.message_lines(m, i))
-            .sum();
+        let total_lines = self.total_lines_cache;
         let visible = self.area_height.max(1) as usize;
         if total_lines > visible {
             (total_lines - visible) as u16
@@ -370,91 +363,102 @@ impl ChatArea {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    fn build_lines(&mut self, preview: Option<&str>) -> Vec<Line<'static>> {
-        if preview.is_none() && !self.dirty {
-            if let Some(ref cached) = self.compiled_output {
-                return cached.clone();
-            }
+    fn build_visible_lines(
+        &mut self,
+        area_height: u16,
+        preview: Option<&str>,
+    ) -> Vec<Line<'static>> {
+        self.area_height = area_height;
+
+        let preview_count = preview
+            .filter(|p| !p.is_empty())
+            .map(|p| p.lines().count() + 2)
+            .unwrap_or(0);
+        let effective_total = self.total_lines_cache + preview_count;
+        let visible = (area_height as usize).max(1);
+        let max_scroll = effective_total.saturating_sub(visible);
+
+        if self.auto_scroll || self.scroll_offset as usize > max_scroll {
+            self.scroll_offset = max_scroll as u16;
         }
 
-        let total: usize = self.rendered_cache.iter().map(|c| c.len()).sum();
-        let extra = if preview.is_some() { 5 } else { 0 };
-        let mut lines = Vec::with_capacity(total + extra);
+        let soff = self.scroll_offset as usize;
+        let eoff = (soff + visible).min(effective_total);
+
+        let mut lines = Vec::with_capacity(eoff.saturating_sub(soff));
+        let mut global = 0usize;
 
         for cached in &self.rendered_cache {
-            lines.extend(cached.iter().cloned());
+            let len = cached.len();
+            if global + len <= soff {
+                global += len;
+                continue;
+            }
+            if global >= eoff {
+                break;
+            }
+            let lo = if soff > global { soff - global } else { 0 };
+            let hi = len.min(eoff - global);
+            for line in &cached[lo..hi] {
+                lines.push(line.clone());
+            }
+            global += len;
         }
 
         if let Some(preview_text) = preview {
-            if !preview_text.is_empty() {
-                lines.push(Self::card_header("Assistant (streaming)", CYAN));
-                for line in preview_text.lines() {
-                    lines.push(Self::card_body_line(line, TEXT, false));
+            if !preview_text.is_empty() && global < eoff && soff < effective_total {
+                let header = Self::card_header("Assistant (streaming)", CYAN);
+                let header_global = self.total_lines_cache;
+                if header_global >= soff && header_global < eoff {
+                    lines.push(header);
                 }
-                lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
+                let content_offset = self.total_lines_cache + 1;
+                for (i, line_text) in preview_text.lines().enumerate() {
+                    let lg = content_offset + i;
+                    if lg >= soff && lg < eoff {
+                        lines.push(Self::card_body_line(line_text, TEXT, false));
+                    }
+                }
+                let cursor_pos = content_offset + preview_text.lines().count();
+                if cursor_pos >= soff && cursor_pos < eoff {
+                    lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
+                }
             }
         }
 
-        if preview.is_none() {
-            self.compiled_output = Some(lines.clone());
-        }
-        self.dirty = false;
         lines
-    }
-
-    fn compute_scroll(&mut self, lines: &[Line<'static>], area_height: u16) {
-        self.area_height = area_height;
-        let total = lines.len();
-        let visible = (area_height as usize).max(1);
-        let max_scroll = total.saturating_sub(visible);
-        if self.auto_scroll || self.scroll_offset > max_scroll as u16 {
-            self.scroll_offset = max_scroll as u16;
-        }
     }
 
     fn render_lines(&mut self, frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
         let paragraph = Paragraph::new(lines)
-            .scroll((self.scroll_offset, 0))
+            .scroll((0, 0))
             .wrap(Wrap { trim: false })
             .style(Style::default().bg(BG));
         frame.render_widget(paragraph, area);
     }
 
     pub fn render_with_preview(&mut self, frame: &mut Frame, area: Rect, preview: &str) {
-        let lines = self.build_lines(Some(preview));
-        self.compute_scroll(&lines, area.height);
+        let lines = self.build_visible_lines(area.height, Some(preview));
         self.render_lines(frame, area, lines);
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let lines = self.build_lines(None);
-        self.compute_scroll(&lines, area.height);
+        let lines = self.build_visible_lines(area.height, None);
         self.render_lines(frame, area, lines);
     }
 
-    /// Return an iterator over the chat messages (message + timestamp).
-    /// Used by the input area to extract context suggestions.
     pub fn messages(&self) -> &[(ChatMessage, std::time::Instant)] {
         &self.messages
     }
 
-    /// Return the rendered lines as plain-text strings (one per visual line).
-    /// Used by the app to extract text for mouse-selection copying.
     pub fn plain_text_lines(&self) -> Vec<String> {
-        self.compiled_output
-            .as_ref()
-            .map(|lines| {
-                lines
-                    .iter()
-                    .map(|line| {
-                        line.spans
-                            .iter()
-                            .map(|s| s.content.as_ref())
-                            .collect::<String>()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut result = Vec::with_capacity(self.total_lines_cache);
+        for cached in &self.rendered_cache {
+            for line in cached {
+                result.push(line.spans.iter().map(|s| s.content.as_ref()).collect());
+            }
+        }
+        result
     }
 }
 

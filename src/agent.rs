@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::request::{ParsedStream, ToolCallState, parse_stream, send_request};
 use crate::config::Config;
+use crate::mcp::McpManager;
 use crate::permission::{PermissionDecision, PermissionOp, PermissionRequest};
 
 #[derive(Debug)]
@@ -38,6 +39,15 @@ pub enum AgentEvent {
         choices: Vec<String>,
         respond: oneshot::Sender<ChoiceResult>,
     },
+    McpServerConnected {
+        server_name: String,
+        prefixed_tools: Vec<String>,
+    },
+    McpServerFailed {
+        server_name: String,
+        error: String,
+    },
+    McpConnectionsDone,
 }
 
 #[derive(Debug)]
@@ -136,6 +146,7 @@ pub struct Agent {
     system_prompt: String,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     todo_store: TodoStore,
+    mcp_manager: McpManager,
 }
 
 impl Agent {
@@ -143,6 +154,7 @@ impl Agent {
         config: Config,
         system_prompt: String,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
+        mcp_manager: McpManager,
     ) -> Self {
         let messages = vec![ChatCompletionRequestMessage::System(
             ChatCompletionRequestSystemMessage {
@@ -158,21 +170,33 @@ impl Agent {
             system_prompt,
             event_tx,
             todo_store: TodoStore::new(),
+            mcp_manager,
         }
     }
 
     fn get_tools(&self) -> Vec<ChatCompletionTools> {
+        let mut all_tools = Vec::new();
+
+        // Native tools
         let native_tools = tools::native_tool_definitions();
-        native_tools
-            .into_iter()
-            .filter_map(|tool_def| {
-                let func_obj: FunctionObject =
-                    serde_json::from_value(tool_def["function"].clone()).ok()?;
-                Some(ChatCompletionTools::Function(ChatCompletionTool {
+        for tool_def in native_tools {
+            if let Ok(func_obj) = serde_json::from_value(tool_def["function"].clone()) {
+                all_tools.push(ChatCompletionTools::Function(ChatCompletionTool {
                     function: func_obj,
-                }))
-            })
-            .collect()
+                }));
+            }
+        }
+
+        // MCP tools (prefixed with server name to avoid collisions)
+        for (_, _, tool_def) in self.mcp_manager.get_openai_tools() {
+            if let Ok(func_obj) = serde_json::from_value(tool_def["function"].clone()) {
+                all_tools.push(ChatCompletionTools::Function(ChatCompletionTool {
+                    function: func_obj,
+                }));
+            }
+        }
+
+        all_tools
     }
 
     pub async fn send_message(&mut self, user_message: &str) -> String {
@@ -361,7 +385,18 @@ impl Agent {
                 }
                 "present_choices" => self.execute_choices_tool(&args).await,
                 _ => {
-                    if let Some((op, path)) = crate::permission::needs_permission(&tc.name, &args) {
+                    if self.mcp_manager.has_prefixed_tool(&tc.name) {
+                        match self
+                            .mcp_manager
+                            .call_prefixed_tool(&tc.name, args.clone())
+                            .await
+                        {
+                            Ok(result_str) => result_str,
+                            Err(e) => format!("MCP tool error: {}", e),
+                        }
+                    } else if let Some((op, path)) =
+                        crate::permission::needs_permission(&tc.name, &args)
+                    {
                         let decision = self.request_permission(op, &path, &tc.name).await;
                         if decision == PermissionDecision::Deny {
                             format!("⛔ Permission denied: {} on {}", tc.name, path)
@@ -574,6 +609,39 @@ impl Agent {
             )
         }
     }
+
+    /// Connect to all configured MCP servers in the background.
+    /// Sends events for each server connection attempt and when all are done.
+    pub async fn connect_mcp_servers(&mut self) {
+        let _ = self
+            .event_tx
+            .send(AgentEvent::Status("Connecting MCP servers...".into()));
+
+        let results = self.mcp_manager.connect_servers().await;
+
+        for (name, result) in results {
+            match result {
+                Ok(tools) => {
+                    let prefixed: Vec<String> = tools
+                        .iter()
+                        .map(|t| format!("{}_{}", name, t.name))
+                        .collect();
+                    let _ = self.event_tx.send(AgentEvent::McpServerConnected {
+                        server_name: name,
+                        prefixed_tools: prefixed,
+                    });
+                }
+                Err(e) => {
+                    let _ = self.event_tx.send(AgentEvent::McpServerFailed {
+                        server_name: name,
+                        error: e,
+                    });
+                }
+            }
+        }
+
+        let _ = self.event_tx.send(AgentEvent::McpConnectionsDone);
+    }
 }
 
 /// Extract content from `<answer>...</answer>` tags if present.
@@ -586,42 +654,4 @@ fn extract_answer(content: &str) -> Option<String> {
         return Some(String::new());
     }
     Some(content[inner_start..end].trim().to_string())
-}
-
-fn fix_response_value(value: &mut Value) {
-    let Some(choices) = value.get_mut("choices") else {
-        return;
-    };
-    let Some(arr) = choices.as_array_mut() else {
-        return;
-    };
-    for choice in arr {
-        if let Some(fr) = choice.get_mut("finish_reason")
-            && fr == ""
-        {
-            *fr = Value::Null;
-        }
-        let Some(delta) = choice.get_mut("delta") else {
-            continue;
-        };
-        let Some(tool_calls) = delta.get_mut("tool_calls") else {
-            continue;
-        };
-        let Some(arr2) = tool_calls.as_array_mut() else {
-            continue;
-        };
-        for tc in arr2 {
-            if let Some(t) = tc.get_mut("type")
-                && t == ""
-            {
-                *t = Value::String("function".to_string());
-            }
-        }
-    }
-}
-
-fn should_retry_status(status: reqwest::StatusCode) -> bool {
-    status.is_server_error()
-        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status == reqwest::StatusCode::REQUEST_TIMEOUT
 }
