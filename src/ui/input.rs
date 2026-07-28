@@ -138,6 +138,58 @@ impl InputArea {
         self.cursor_pos = self.buffer.len();
     }
 
+    /// Navigate backwards in the input history. Returns true if the buffer
+    /// was changed.
+    pub fn history_up(&mut self) -> bool {
+        if self.history_pos.is_none() {
+            // First up press: push current input to history and go to last item.
+            if !self.buffer.is_empty() {
+                self.history.push(self.buffer.clone());
+            }
+            if let Some(last) = self.history.last() {
+                self.buffer = last.clone();
+                self.cursor_pos = self.buffer.len();
+                self.history_pos = Some(self.history.len().saturating_sub(1));
+                return true;
+            }
+            return false;
+        }
+        let pos = self.history_pos.unwrap_or(0);
+        if pos > 0 {
+            let new_pos = pos - 1;
+            if let Some(item) = self.history.get(new_pos) {
+                self.buffer = item.clone();
+                self.cursor_pos = self.buffer.len();
+                self.history_pos = Some(new_pos);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Navigate forwards in the input history. Returns true if the buffer
+    /// was changed.
+    pub fn history_down(&mut self) -> bool {
+        if let Some(pos) = self.history_pos {
+            if pos + 1 < self.history.len() {
+                let new_pos = pos + 1;
+                if let Some(item) = self.history.get(new_pos) {
+                    self.buffer = item.clone();
+                    self.cursor_pos = self.buffer.len();
+                    self.history_pos = Some(new_pos);
+                    return true;
+                }
+            } else {
+                // End of history: clear input.
+                self.buffer.clear();
+                self.cursor_pos = 0;
+                self.history_pos = None;
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn select_suggestion_up(&mut self) {
         let matches = self.matching_commands();
         if matches.is_empty() {
@@ -244,9 +296,11 @@ impl InputArea {
 
     /// Return all suggestions (slash commands + context items) that match the
     /// current input buffer. When the buffer is empty, all context suggestions
-    /// are shown. When the buffer starts with '/', only slash commands matching
-    /// the partial text are returned. Otherwise context suggestions whose label
-    /// starts with the input (case-insensitive) are returned.
+    /// are shown. When the buffer starts with '/', ONLY built-in slash commands
+    /// matching the partial text are returned (context suggestions are excluded
+    /// so the slash-command menu stays clean and predictable). Otherwise context
+    /// suggestions whose label starts with the input (case-insensitive) are
+    /// returned.
     pub fn matching_commands(&self) -> Vec<SuggestionItem> {
         let input = self.buffer.trim_start();
         if input.is_empty() {
@@ -257,21 +311,11 @@ impl InputArea {
 
         if input.starts_with('/') {
             let partial = input.to_lowercase();
-            let mut matches: Vec<SuggestionItem> = SLASH_COMMANDS
+            SLASH_COMMANDS
                 .iter()
                 .filter(|(cmd, _)| cmd.starts_with(&partial))
                 .map(|(cmd, desc)| SuggestionItem::SlashCommand(cmd, desc))
-                .collect();
-            // Also include context suggestions that start with the partial
-            // text, so context items are always discoverable.
-            let ctx_matches: Vec<SuggestionItem> = self
-                .context_suggestions
-                .iter()
-                .filter(|s| s.label().to_lowercase().starts_with(&partial))
-                .cloned()
-                .collect();
-            matches.extend(ctx_matches);
-            matches
+                .collect()
         } else {
             // Non-slash input: match against context suggestions only.
             let partial = input.to_lowercase();
@@ -284,21 +328,25 @@ impl InputArea {
     }
 
     /// Ghost suffix text shown after the buffer as a dim completion hint.
+    /// Only shown when there is exactly one matching context suggestion and
+    /// the user is typing a non-slash command.
     fn ghost_suffix_text(&self) -> Option<String> {
         let buffer = &self.buffer;
         if buffer.is_empty() || buffer.starts_with('/') {
             return None;
         }
-        self.matching_commands().first().and_then(|item| {
-            let label = item.label();
-            if label.len() > buffer.len()
-                && label.to_lowercase().starts_with(&buffer.to_lowercase())
-            {
-                Some(label[buffer.len()..].to_string())
-            } else {
-                None
-            }
-        })
+        let matches = self.matching_commands();
+        if matches.len() != 1 {
+            return None;
+        }
+        let label = matches[0].label();
+        if label.len() > buffer.len()
+            && label.to_lowercase().starts_with(&buffer.to_lowercase())
+        {
+            Some(label[buffer.len()..].to_string())
+        } else {
+            None
+        }
     }
 
     fn visual_line_count(text: &str, content_width: usize) -> u16 {
@@ -308,12 +356,21 @@ impl InputArea {
         let mut line_w = 0usize;
         let mut lines = 1u16;
         for c in text.chars() {
-            let w = c.width().unwrap_or(0);
-            if line_w + w > content_width {
-                lines += 1;
-                line_w = w;
-            } else {
-                line_w += w;
+            match c {
+                '\n' => {
+                    // Explicit newline: start a fresh visual line.
+                    lines += 1;
+                    line_w = 0;
+                }
+                _ => {
+                    let w = c.width().unwrap_or(0);
+                    if line_w + w > content_width {
+                        lines += 1;
+                        line_w = w;
+                    } else {
+                        line_w += w;
+                    }
+                }
             }
         }
         lines
@@ -339,12 +396,20 @@ impl InputArea {
         let mut line = 0u16;
         let mut col = 0usize;
         for c in text_before.chars() {
-            let w = c.width().unwrap_or(0);
-            if col + w > cw {
-                line += 1;
-                col = w;
-            } else {
-                col += w;
+            match c {
+                '\n' => {
+                    line += 1;
+                    col = 0;
+                }
+                _ => {
+                    let w = c.width().unwrap_or(0);
+                    if col + w > cw {
+                        line += 1;
+                        col = w;
+                    } else {
+                        col += w;
+                    }
+                }
             }
         }
         (line, col as u16)

@@ -218,33 +218,38 @@ impl App {
 
         match key.code {
             KeyCode::Enter => {
-                let input = self.input.accept_selected_suggestion();
-                let input = if let Some(cmd) = input {
-                    cmd
+                // Shift+Enter inserts a literal newline instead of submitting.
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.input.insert_char('\n');
                 } else {
-                    self.input.get_input()
-                };
-                if !input.trim().is_empty() {
-                    if input.starts_with('/') {
-                        self.handle_slash_command(&input);
+                    let input = self.input.accept_selected_suggestion();
+                    let input = if let Some(cmd) = input {
+                        cmd
                     } else {
-                        if self.processing {
-                            // Agent is still processing; buffer the message for later.
-                            self.pending_messages.push(input.clone());
-                            self.input.clear();
-                            self.status_message =
-                                format!("Processing... ({} queued)", self.pending_messages.len());
+                        self.input.get_input()
+                    };
+                    if !input.trim().is_empty() {
+                        if input.starts_with('/') {
+                            self.handle_slash_command(&input);
                         } else {
-                            self.processing = true;
-                            self.streaming_buffer.clear();
-                            self.status_message = "Processing...".to_string();
-                            self.chat.add_message(ChatMessage::User(input.clone()));
-                            self.input.clear();
-                            let _ = self.cmd_tx.send(AgentCommand::SendMessage(input));
+                            if self.processing {
+                                // Agent is still processing; buffer the message for later.
+                                self.pending_messages.push(input.clone());
+                                self.input.clear();
+                                self.status_message =
+                                    format!("Processing... ({} queued)", self.pending_messages.len());
+                            } else {
+                                self.processing = true;
+                                self.streaming_buffer.clear();
+                                self.status_message = "Processing...".to_string();
+                                self.chat.add_message(ChatMessage::User(input.clone()));
+                                self.input.clear();
+                                let _ = self.cmd_tx.send(AgentCommand::SendMessage(input));
+                            }
                         }
+                    } else {
+                        self.input.clear();
                     }
-                } else {
-                    self.input.clear();
                 }
             }
             KeyCode::Char(c) => {
@@ -280,13 +285,14 @@ impl App {
                 if self.input.get_input().starts_with('/') {
                     self.input.select_suggestion_up();
                 } else {
-                    self.chat.scroll_up();
+                    self.input.history_up();
                 }
             }
             KeyCode::Down => {
                 if self.input.get_input().starts_with('/') {
                     self.input.select_suggestion_down();
-                } else {
+                } else if !self.input.history_down() {
+                    // Not in history navigation; fall back to chat scroll.
                     self.chat.scroll_down();
                 }
             }
