@@ -364,6 +364,7 @@ impl ChatArea {
         &mut self,
         area_height: u16,
         preview: Option<&str>,
+        queued: &[String],
     ) -> Vec<Line<'static>> {
         self.area_height = area_height;
 
@@ -371,7 +372,8 @@ impl ChatArea {
             .filter(|p| !p.is_empty())
             .map(|p| p.lines().count() + 2)
             .unwrap_or(0);
-        let effective_total = self.total_lines_cache + preview_count;
+        let queued_count: usize = queued.iter().map(|m| m.lines().count() + 2).sum();
+        let effective_total = self.total_lines_cache + preview_count + queued_count;
         let visible = (area_height as usize).max(1);
         let max_scroll = effective_total.saturating_sub(visible);
 
@@ -423,6 +425,32 @@ impl ChatArea {
             if cursor_pos >= soff && cursor_pos < eoff {
                 lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
             }
+            global = self.total_lines_cache + preview_count;
+        }
+
+        // Render queued messages after preview (or after cached if no preview)
+        if !queued.is_empty() && global < eoff && soff < effective_total {
+            let mut queued_offset = self.total_lines_cache + preview_count;
+            for msg in queued {
+                let header = Self::card_header("User (Queue)", YELLOW);
+                let header_global = queued_offset;
+                if header_global >= soff && header_global < eoff {
+                    lines.push(header);
+                }
+                queued_offset += 1;
+                for line_text in msg.lines() {
+                    let lg = queued_offset;
+                    if lg >= soff && lg < eoff {
+                        lines.push(Self::card_body_line(line_text, TEXT_DIM, false));
+                    }
+                    queued_offset += 1;
+                }
+                // trailing blank line
+                if queued_offset >= soff && queued_offset < eoff {
+                    lines.push(Line::from(""));
+                }
+                queued_offset += 1;
+            }
         }
 
         lines
@@ -436,13 +464,19 @@ impl ChatArea {
         frame.render_widget(paragraph, area);
     }
 
-    pub fn render_with_preview(&mut self, frame: &mut Frame, area: Rect, preview: &str) {
-        let lines = self.build_visible_lines(area.height, Some(preview));
+    pub fn render_with_preview(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        preview: &str,
+        queued: &[String],
+    ) {
+        let lines = self.build_visible_lines(area.height, Some(preview), queued);
         self.render_lines(frame, area, lines);
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let lines = self.build_visible_lines(area.height, None);
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, queued: &[String]) {
+        let lines = self.build_visible_lines(area.height, None, queued);
         self.render_lines(frame, area, lines);
     }
 

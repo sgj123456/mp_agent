@@ -27,6 +27,11 @@ pub async fn send_request(
         request.max_completion_tokens = Some(max_tokens);
     }
 
+    request.stream_options = Some(ChatCompletionStreamOptions {
+        include_usage: Some(true),
+        include_obfuscation: Some(false),
+    });
+
     let url = format!("{}/chat/completions", config.base_url);
     let max_retries = 3;
 
@@ -188,21 +193,37 @@ pub async fn parse_stream(
 
                 fix_response_value(&mut value);
 
-                if let Some(usage) = value.get("usage") {
-                    let prompt = usage
+                // Emit token usage if present, then neutralize the usage field
+                // so serde doesn't choke on empty `usage: {}` (CompletionUsage
+                // requires prompt_tokens to be present).
+                if let Some(usage) = value.get("usage").and_then(|u| u.as_object()) {
+                    if let Some(prompt) = usage
                         .get("prompt_tokens")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let completion = usage
-                        .get("completion_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    // Emit the usage event directly from the parser.
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(AgentEvent::TokenUsage { prompt, completion });
+                    {
+                        let completion = usage
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(AgentEvent::TokenUsage {
+                                prompt,
+                                completion,
+                            });
+                        }
                     }
-                    // Don't pollute the content stream with usage text.
-                    continue;
+                    // If choices are empty this is a usage-only chunk after
+                    // the final content — nothing to process.
+                    let choices_empty = value
+                        .get("choices")
+                        .and_then(|c| c.as_array())
+                        .is_some_and(|a| a.is_empty());
+                    if choices_empty {
+                        continue;
+                    }
+                    // Otherwise it is a content chunk; null out the usage
+                    // field so that serde does not fail on `usage: {}`.
+                    value["usage"] = Value::Null;
                 }
 
                 let stream_chunk: CreateChatCompletionStreamResponse =
@@ -250,9 +271,9 @@ pub async fn parse_stream(
                             }
                         }
                     }
-                    if choice.finish_reason.is_some() {
-                        break;
-                    }
+                    // Don't break here — the final usage-only chunk (with
+                    // empty choices) arrives after finish_reason when
+                    // stream_options.include_usage is true.
                 }
             }
             Some(Err(e)) => {

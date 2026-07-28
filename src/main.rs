@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
+        crossterm::event::DisableMouseCapture,
     )?;
     terminal.show_cursor()?;
 

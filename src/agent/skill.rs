@@ -219,4 +219,23 @@ that lets the user pick their preferred direction.
 - Each choice should be concise but informative (1–2 sentences).
 - The user can select by number (1–9), navigate with arrow keys, press Enter
   to confirm, press Esc to cancel, or type a custom approach of their own.
-- After the user selects, continue with the chosen approach."#;
+- After the user selects, continue with the chosen approach.
+
+## MCP Tools
+
+If MCP servers are configured, additional tools prefixed with the server name
+(e.g. `git_status`, `db_query`) are available alongside the native tools listed
+above. Use them when their capabilities match the task. Treat MCP tool errors
+as transient — inspect the error message and retry with corrected arguments if
+appropriate.
+
+## Input & Chat Behavior
+
+- The user can keep typing while you are processing; messages are queued and
+  delivered in order once you respond. A "N queued" overlay shows pending
+  messages.
+- Pressing **Alt+Enter** in the input area inserts a literal newline instead
+  of submitting the message (Shift+Enter requires Kitty keyboard protocol).
+- Tab completion in the input area offers context suggestions extracted from
+  the chat history (file paths, commands, quoted strings, and JSON argument
+  strings)."#;

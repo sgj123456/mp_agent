@@ -340,9 +340,7 @@ impl InputArea {
             return None;
         }
         let label = matches[0].label();
-        if label.len() > buffer.len()
-            && label.to_lowercase().starts_with(&buffer.to_lowercase())
-        {
+        if label.len() > buffer.len() && label.to_lowercase().starts_with(&buffer.to_lowercase()) {
             Some(label[buffer.len()..].to_string())
         } else {
             None
@@ -364,7 +362,13 @@ impl InputArea {
                 }
                 _ => {
                     let w = c.width().unwrap_or(0);
-                    if line_w + w > content_width {
+                    // Only wrap if there is already content on the current line
+                    // and adding this character would exceed the content width.
+                    // If the line is empty, allow wide characters (e.g. CJK) to
+                    // overflow onto the current line, matching Ratatui's
+                    // WordWrapper behavior which places the character on the
+                    // current line even when it exceeds the width limit.
+                    if line_w > 0 && line_w + w > content_width {
                         lines += 1;
                         line_w = w;
                     } else {
@@ -403,7 +407,12 @@ impl InputArea {
                 }
                 _ => {
                     let w = c.width().unwrap_or(0);
-                    if col + w > cw {
+                    // Only wrap if there is already content on the current line
+                    // and adding this character would exceed the content width.
+                    // If the line is empty, allow wide characters (e.g. CJK) to
+                    // overflow onto the current line, matching Ratatui's
+                    // WordWrapper behavior.
+                    if col > 0 && col + w > cw {
                         line += 1;
                         col = w;
                     } else {
@@ -494,15 +503,9 @@ impl InputArea {
             if let Some(suffix) = &ghost_suffix {
                 spans.push(Span::styled(suffix.clone(), Style::default().fg(TEXT_DIM)));
             }
-        } else if !self.context_suggestions.is_empty() {
-            let hints: Vec<String> = self
-                .context_suggestions
-                .iter()
-                .take(3)
-                .map(|s| s.label())
-                .collect();
+        } else if let Some(first) = self.context_suggestions.first() {
             spans.push(Span::styled(
-                hints.join("  ·  "),
+                first.label(),
                 Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
             ));
         } else {

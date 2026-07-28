@@ -62,6 +62,12 @@ pub struct App {
     permission_rules: Vec<PermissionRule>,
     token_usage_total: u64,
     token_usage_session: u64,
+    /// Prompt tokens for current session (context usage).
+    prompt_tokens_session: u64,
+    /// Number of tokens streamed in the current response (resets per turn).
+    streamed_tokens: u64,
+    /// Model's maximum context window (in tokens).
+    context_limit: u64,
     /// Message queue for user inputs arriving while the agent is processing.
     /// Inputs typed during processing are buffered and sent sequentially once
     /// the current turn is done.
@@ -88,6 +94,7 @@ impl App {
         let system_prompt = skill::build_system_prompt(&skills, agents_md.as_deref());
 
         let last_model = config.model.clone();
+        let context_limit = model_context_limit(&last_model);
 
         // Initialize MCP manager from configuration file if present
         let mcp_manager = if std::path::Path::new("mcp_servers.json").exists() {
@@ -135,6 +142,9 @@ impl App {
             permission_rules: Vec::new(),
             token_usage_total: 0,
             token_usage_session: 0,
+            prompt_tokens_session: 0,
+            streamed_tokens: 0,
+            context_limit,
             pending_messages: Vec::new(),
             selection: None,
             left_button_down: false,
@@ -189,6 +199,7 @@ impl App {
             if self.processing {
                 self.processing = false;
                 self.streaming_buffer.clear();
+                self.streamed_tokens = 0;
                 self.pending_messages.clear();
                 self.status_message = "Cancelled".to_string();
                 return;
@@ -218,8 +229,10 @@ impl App {
 
         match key.code {
             KeyCode::Enter => {
-                // Shift+Enter inserts a literal newline instead of submitting.
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                // Alt+Enter inserts a literal newline instead of submitting.
+                // Shift+Enter requires Kitty keyboard protocol support which
+                // many terminals lack; Alt is universally reliable.
+                if key.modifiers.contains(KeyModifiers::ALT) {
                     self.input.insert_char('\n');
                 } else {
                     let input = self.input.accept_selected_suggestion();
@@ -236,8 +249,10 @@ impl App {
                                 // Agent is still processing; buffer the message for later.
                                 self.pending_messages.push(input.clone());
                                 self.input.clear();
-                                self.status_message =
-                                    format!("Processing... ({} queued)", self.pending_messages.len());
+                                self.status_message = format!(
+                                    "Processing... ({} queued)",
+                                    self.pending_messages.len()
+                                );
                             } else {
                                 self.processing = true;
                                 self.streaming_buffer.clear();
@@ -469,6 +484,7 @@ impl App {
                      - `Ctrl+E` - Go to end of input\n\
                      - `Ctrl+U` - Clear input\n\
                      - `Ctrl+L` - Clear chat\n\
+                     - `Alt+Enter` - Insert newline in input\n\
                      - `Tab` - Auto-complete slash commands\n\
                      - `↑/↓` - Input history / Scroll chat\n\n\
                      **Streaming Input:**\n\
@@ -550,12 +566,13 @@ impl App {
             match event {
                 AgentEvent::Token(token) => {
                     self.streaming_buffer.push_str(&token);
-                    self.status_message =
-                        format!("Streaming... {} tokens", self.token_usage_session);
+                    self.streamed_tokens += 1;
+                    self.status_message = format!("Streaming... {} tokens", self.streamed_tokens);
                 }
                 AgentEvent::MessageComplete(text) => {
                     self.chat.add_message(ChatMessage::Assistant(text));
                     self.streaming_buffer.clear();
+                    self.streamed_tokens = 0;
                     self.processing = false;
                     self.update_context_suggestions();
                     self.drain_pending_messages();
@@ -573,6 +590,7 @@ impl App {
                             .add_message(ChatMessage::Assistant(self.streaming_buffer.clone()));
                         self.streaming_buffer.clear();
                     }
+                    self.streamed_tokens = 0;
                     self.processing = false;
                     self.drain_pending_messages();
                 }
@@ -580,6 +598,7 @@ impl App {
                     self.chat.add_message(ChatMessage::Error(msg));
                     self.processing = false;
                     self.streaming_buffer.clear();
+                    self.streamed_tokens = 0;
                     self.status_message = "Error".to_string();
                 }
                 AgentEvent::Status(msg) => {
@@ -608,6 +627,8 @@ impl App {
                 AgentEvent::TokenUsage { prompt, completion } => {
                     self.token_usage_total += prompt + completion;
                     self.token_usage_session += prompt + completion;
+                    self.prompt_tokens_session = prompt;
+                    self.streamed_tokens = 0;
                 }
                 AgentEvent::McpServerConnected {
                     server_name,
@@ -639,8 +660,8 @@ impl App {
 
     /// Drain the pending message queue: if there are any user inputs that were
     /// buffered while the agent was processing, send the first one to the agent
-    /// now that the current turn is complete. The user will no longer be blocked
-    /// from typing and the queued messages flow naturally into the conversation.
+    /// now that the current turn is complete. The message is added to the chat
+    /// as a normal `User` message at this point.
     fn drain_pending_messages(&mut self) {
         if self.pending_messages.is_empty() {
             self.status_message = "Ready".to_string();
@@ -664,6 +685,15 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> color_eyre::Result<()> {
         self.frame_count += 1;
+        let pending: Vec<String> = if !self.pending_messages.is_empty() {
+            self.pending_messages.clone()
+        } else {
+            Vec::new()
+        };
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -681,9 +711,9 @@ impl App {
 
             if !self.streaming_buffer.is_empty() {
                 self.chat
-                    .render_with_preview(frame, chat_area, &self.streaming_buffer);
+                    .render_with_preview(frame, chat_area, &self.streaming_buffer, &pending);
             } else {
-                self.chat.render(frame, chat_area);
+                self.chat.render(frame, chat_area, &pending);
             }
 
             // Cache the plain-text lines of the chat content so that the
@@ -841,9 +871,23 @@ impl App {
                     String::new()
                 };
 
+                let ctx_text = if self.context_limit > 0 {
+                    let pct = self.prompt_tokens_session as f64 / self.context_limit as f64 * 100.0;
+                    format!(
+                        " ctx {}",
+                        format_token_count(self.prompt_tokens_session, self.context_limit, pct)
+                    )
+                } else {
+                    String::new()
+                };
+                let cwd_short = if cwd.len() > 30 {
+                    format!("..{}", &cwd[cwd.len().saturating_sub(28)..])
+                } else {
+                    cwd.clone()
+                };
                 let status_text = format!(
-                    "▌  mp_agent  │  {} tools  │  {}{}",
-                    self.tool_count, symbol, self.status_message
+                    "▌ {} │ {} │ {} tools{} │  {}{}",
+                    self.last_model, cwd_short, self.tool_count, ctx_text, symbol, self.status_message
                 );
                 let status = Paragraph::new(Line::from(Span::styled(
                     status_text.trim(),
@@ -875,6 +919,62 @@ fn dirname(path: &str) -> String {
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string())
+}
+
+fn format_token_count(used: u64, limit: u64, pct: f64) -> String {
+    let used_fmt = if used >= 1_000_000 {
+        format!("{:.1}M", used as f64 / 1_000_000.0)
+    } else if used >= 1_000 {
+        format!("{:.1}K", used as f64 / 1_000.0)
+    } else {
+        format!("{}", used)
+    };
+    let limit_fmt = if limit >= 1_000_000 {
+        format!("{:.0}M", limit as f64 / 1_000_000.0)
+    } else if limit >= 1_000 {
+        format!("{:.0}K", limit as f64 / 1_000.0)
+    } else {
+        format!("{}", limit)
+    };
+    if pct < 0.1 {
+        format!("{}/{}", used_fmt, limit_fmt)
+    } else {
+        format!("{}/{} ({:.0}%)", used_fmt, limit_fmt, pct)
+    }
+}
+
+/// Return the known context window (in tokens) for a given model name.
+fn model_context_limit(model: &str) -> u64 {
+    let lower = model.to_lowercase();
+    if lower.contains("gpt-4o") || lower.contains("gpt-4-turbo") {
+        128_000
+    } else if lower.contains("gpt-4") {
+        8_192
+    } else if lower.contains("gpt-3.5") || lower.contains("gpt-35") {
+        16_385
+    } else if lower.contains("claude-3") || lower.contains("claude") {
+        200_000
+    } else if lower.contains("deepseek") {
+        64_000
+    } else if lower.contains("qwen") {
+        if lower.contains("qwen2.5") || lower.contains("qwen2_5") {
+            128_000
+        } else {
+            32_000
+        }
+    } else if lower.contains("gemini") {
+        1_000_000
+    } else if lower.contains("llama-3") {
+        8_192
+    } else if lower.contains("llama-2") {
+        4_096
+    } else if lower.contains("mistral") || lower.contains("mixtral") {
+        32_000
+    } else if lower.contains("codestral") {
+        256_000
+    } else {
+        128_000
+    }
 }
 
 /// Extract the plain text covered by the selection range from the cached
