@@ -2,6 +2,8 @@ pub mod request;
 pub mod skill;
 pub mod tools;
 
+pub use tools::truncate;
+
 use async_openai::types::chat::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -434,7 +436,6 @@ impl Agent {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn clear_history(&mut self) {
         self.messages.clear();
         self.messages.push(ChatCompletionRequestMessage::System(

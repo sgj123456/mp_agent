@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
@@ -14,6 +14,7 @@ use crate::mcp::McpManager;
 use crate::permission::{PermissionDecision, PermissionRequest, PermissionRule, match_rule};
 use crate::ui::chat::{ChatArea, ChatMessage};
 use crate::ui::input::{InputArea, SuggestionItem};
+use crate::ui::layout::{compute_choice_panel, compute_layout, compute_suggestion_panel};
 use crate::ui::{BG, CYAN, SURFACE, TEXT, TEXT_DIM, YELLOW};
 
 /// Represents a selected text range within the chat area.
@@ -28,6 +29,7 @@ pub enum AgentCommand {
     SendMessage(String),
     ConnectMcp,
     Shutdown,
+    ClearHistory,
 }
 
 struct PendingPermission {
@@ -480,6 +482,7 @@ impl App {
                 self.chat
                     .add_message(ChatMessage::System("Chat cleared".to_string()));
                 self.input.clear();
+                let _ = self.cmd_tx.send(AgentCommand::ClearHistory);
             }
             "/model" => {
                 let msg = if args.is_empty() {
@@ -665,18 +668,10 @@ impl App {
             let input_wrapped = self.input.wrapped_height(input_content_width);
             let input_height = input_wrapped.saturating_add(2).clamp(3, 10);
 
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(5),               // Chat area
-                    Constraint::Length(input_height), // Input area
-                    Constraint::Length(1),            // Status bar
-                ])
-                .split(area);
-
-            let chat_area = chunks[0];
-            let input_area = chunks[1];
-            let status_area = chunks[2];
+            let layout = compute_layout(area, input_height);
+            let chat_area = layout.chat;
+            let input_area = layout.input;
+            let status_area = layout.status;
 
             if !self.streaming_buffer.is_empty() {
                 self.chat
@@ -731,16 +726,7 @@ impl App {
             // content behind it.
             if self.pending_choice.is_empty() && self.input.get_input().starts_with('/') {
                 let matches = self.input.matching_commands();
-                if !matches.is_empty() {
-                    let suggestion_height = (matches.len() as u16 + 2).clamp(3, 10);
-                    let suggested_y = input_area.y.saturating_sub(suggestion_height);
-                    let available = input_area.y + input_area.height - suggested_y;
-                    let suggestion_area = Rect {
-                        x: input_area.x,
-                        y: suggested_y,
-                        width: input_area.width,
-                        height: suggestion_height.min(available),
-                    };
+                if let Some(suggestion_area) = compute_suggestion_panel(input_area, matches.len()) {
                     frame.render_widget(Clear, suggestion_area);
                     self.input.render_suggestions(frame, suggestion_area);
                 }
@@ -755,16 +741,7 @@ impl App {
                 let selected = current.selected;
                 let custom_buffer = &current.input_buffer;
 
-                let panel_width = chat_area.width.saturating_sub(4);
-                let panel_height = (n as u16 + 4).min(chat_area.height.saturating_sub(2));
-                let panel_x = chat_area.x + 2;
-                let panel_y = chat_area.y + 1;
-                let panel_area = Rect {
-                    x: panel_x,
-                    y: panel_y,
-                    width: panel_width,
-                    height: panel_height,
-                };
+                let panel_area = compute_choice_panel(chat_area, n);
 
                 let mut lines = Vec::new();
                 // Title bar
@@ -924,6 +901,9 @@ async fn run_agent_task(mut agent: Agent, mut cmd_rx: mpsc::UnboundedReceiver<Ag
             }
             AgentCommand::Shutdown => {
                 break;
+            }
+            AgentCommand::ClearHistory => {
+                agent.clear_history();
             }
         }
     }

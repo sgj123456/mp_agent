@@ -11,6 +11,7 @@ use super::{
     ACCENT, BG, CYAN, DIFF_ADD, DIFF_HEADER, DIFF_REMOVE, GREEN, RED, TEXT, TEXT_DIM, YELLOW,
     markdown,
 };
+use crate::agent::truncate;
 
 #[derive(Debug, Clone)]
 pub enum ChatMessage {
@@ -268,10 +269,6 @@ impl ChatArea {
         self.scroll_offset
     }
 
-    pub fn toggle_fold_at_scroll(&mut self) {
-        self.toggle_fold_at_line(self.scroll_offset as usize);
-    }
-
     pub fn toggle_fold_at_line(&mut self, absolute_line: usize) {
         let mut pos = 0usize;
         for (idx, (msg, _)) in self.messages.iter().enumerate() {
@@ -397,7 +394,7 @@ impl ChatArea {
             if global >= eoff {
                 break;
             }
-            let lo = if soff > global { soff - global } else { 0 };
+            let lo = soff.saturating_sub(global);
             let hi = len.min(eoff - global);
             for line in &cached[lo..hi] {
                 lines.push(line.clone());
@@ -405,24 +402,26 @@ impl ChatArea {
             global += len;
         }
 
-        if let Some(preview_text) = preview {
-            if !preview_text.is_empty() && global < eoff && soff < effective_total {
-                let header = Self::card_header("Assistant (streaming)", CYAN);
-                let header_global = self.total_lines_cache;
-                if header_global >= soff && header_global < eoff {
-                    lines.push(header);
+        if let Some(preview_text) = preview
+            && !preview_text.is_empty()
+            && global < eoff
+            && soff < effective_total
+        {
+            let header = Self::card_header("Assistant (streaming)", CYAN);
+            let header_global = self.total_lines_cache;
+            if header_global >= soff && header_global < eoff {
+                lines.push(header);
+            }
+            let content_offset = self.total_lines_cache + 1;
+            for (i, line_text) in preview_text.lines().enumerate() {
+                let lg = content_offset + i;
+                if lg >= soff && lg < eoff {
+                    lines.push(Self::card_body_line(line_text, TEXT, false));
                 }
-                let content_offset = self.total_lines_cache + 1;
-                for (i, line_text) in preview_text.lines().enumerate() {
-                    let lg = content_offset + i;
-                    if lg >= soff && lg < eoff {
-                        lines.push(Self::card_body_line(line_text, TEXT, false));
-                    }
-                }
-                let cursor_pos = content_offset + preview_text.lines().count();
-                if cursor_pos >= soff && cursor_pos < eoff {
-                    lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
-                }
+            }
+            let cursor_pos = content_offset + preview_text.lines().count();
+            if cursor_pos >= soff && cursor_pos < eoff {
+                lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
             }
         }
 
@@ -459,16 +458,6 @@ impl ChatArea {
             }
         }
         result
-    }
-}
-
-fn safe_truncate(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() > max_chars {
-        let truncated: String = chars[..max_chars].iter().collect();
-        format!("{}...", truncated)
-    } else {
-        s.to_string()
     }
 }
 
@@ -531,15 +520,5 @@ fn summarize_tool_call(name: &str, args_json: &str) -> String {
             }
         }
         _ => truncate(args_json, 80),
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() > max {
-        let truncated: String = chars[..max].iter().collect();
-        format!("{}...", truncated)
-    } else {
-        s.to_string()
     }
 }

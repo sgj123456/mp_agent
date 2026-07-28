@@ -104,17 +104,8 @@ impl InputArea {
         self.suggestion_cursor = None;
     }
 
-    /// Clear all dynamic context suggestions.
-    pub fn clear_context_suggestions(&mut self) {
-        self.context_suggestions.clear();
-    }
-
     pub fn get_input(&self) -> String {
         self.buffer.clone()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
     }
 
     pub fn move_cursor_left(&mut self) {
@@ -145,36 +136,6 @@ impl InputArea {
 
     pub fn move_cursor_end(&mut self) {
         self.cursor_pos = self.buffer.len();
-    }
-
-    pub fn navigate_history_up(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let pos = match self.history_pos {
-            Some(p) if p > 0 => p - 1,
-            None => self.history.len().saturating_sub(1),
-            _ => return,
-        };
-        self.history_pos = Some(pos);
-        self.buffer = self.history[pos].clone();
-        self.cursor_pos = self.buffer.len();
-    }
-
-    pub fn navigate_history_down(&mut self) {
-        match self.history_pos {
-            Some(p) if p + 1 < self.history.len() => {
-                self.history_pos = Some(p + 1);
-                self.buffer = self.history[p + 1].clone();
-                self.cursor_pos = self.buffer.len();
-            }
-            Some(_) => {
-                self.history_pos = None;
-                self.buffer.clear();
-                self.cursor_pos = 0;
-            }
-            None => {}
-        }
     }
 
     pub fn select_suggestion_up(&mut self) {
@@ -299,7 +260,7 @@ impl InputArea {
             let mut matches: Vec<SuggestionItem> = SLASH_COMMANDS
                 .iter()
                 .filter(|(cmd, _)| cmd.starts_with(&partial))
-                .map(|(cmd, desc)| SuggestionItem::SlashCommand(*cmd, *desc))
+                .map(|(cmd, desc)| SuggestionItem::SlashCommand(cmd, desc))
                 .collect();
             // Also include context suggestions that start with the partial
             // text, so context items are always discoverable.
@@ -320,10 +281,6 @@ impl InputArea {
                 .cloned()
                 .collect()
         }
-    }
-
-    pub fn suggestion_count(&self) -> usize {
-        self.matching_commands().len()
     }
 
     /// Ghost suffix text shown after the buffer as a dim completion hint.
@@ -412,15 +369,13 @@ impl InputArea {
                     .fg(BG)
                     .bg(CYAN)
                     .add_modifier(Modifier::BOLD)
-            } else if is_context {
-                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)
             };
 
             let desc_fg = if selected { CYAN } else { TEXT_DIM };
             let desc_text = if is_context {
-                format!(" (from context)")
+                " (from context)".to_string()
             } else {
                 format!(" {}", desc)
             };

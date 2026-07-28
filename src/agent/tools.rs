@@ -409,7 +409,7 @@ async fn execute_edit_file(args: &Value) -> String {
 
     let count = content.matches(old_string).count();
     if count == 0 {
-        let display = safe_truncate_old(old_string, 100);
+        let display = truncate(old_string, 100);
         return format!(
             "Error: old_string not found in {}. old_string={:?}",
             path, display
@@ -565,7 +565,9 @@ async fn execute_list_directory(args: &Value) -> String {
     }
 }
 
-fn safe_truncate_old(s: &str, max_chars: usize) -> String {
+/// Truncate a string to at most `max_chars` characters, appending "…" if
+/// truncated. Works correctly on UTF-8 boundaries.
+pub fn truncate(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() > max_chars {
         let truncated: String = chars[..max_chars].iter().collect();
@@ -604,13 +606,13 @@ mod tests {
     }
 
     #[test]
-    fn test_safe_truncate_old_short() {
-        assert_eq!(safe_truncate_old("hello", 10), "hello");
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
     }
 
     #[test]
-    fn test_safe_truncate_old_long() {
-        let result = safe_truncate_old("hello world", 5);
+    fn test_truncate_long() {
+        let result = truncate("hello world", 5);
         assert_eq!(result, "hello...");
     }
 

@@ -1,11 +1,8 @@
-#[allow(dead_code)]
 mod agent;
 mod app;
 mod config;
 mod error;
-#[allow(dead_code)]
 mod mcp;
-#[allow(dead_code)]
 mod permission;
 mod ui;
 

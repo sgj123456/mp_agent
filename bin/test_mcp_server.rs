@@ -191,11 +191,11 @@ impl Service<RoleServer> for TestMcpServer {
                 ClientRequest::CallToolRequest(req) => {
                     let name: &str = req.params.name.as_ref();
                     let args = req.params.arguments.as_ref();
-                    let result = match name {
+
+                    match name {
                         "echo" => {
                             let params: EchoRequest = match args
-                                .map(|v| serde_json::from_value(Value::Object(v.clone())).ok())
-                                .flatten()
+                                .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
                                 None => {
@@ -210,8 +210,7 @@ impl Service<RoleServer> for TestMcpServer {
                         }
                         "add" => {
                             let params: AddRequest = match args
-                                .map(|v| serde_json::from_value(Value::Object(v.clone())).ok())
-                                .flatten()
+                                .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
                                 None => {
@@ -226,8 +225,7 @@ impl Service<RoleServer> for TestMcpServer {
                         }
                         "greet" => {
                             let params: GreetRequest = match args
-                                .map(|v| serde_json::from_value(Value::Object(v.clone())).ok())
-                                .flatten()
+                                .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
                                 None => {
@@ -240,15 +238,12 @@ impl Service<RoleServer> for TestMcpServer {
                             };
                             Ok(ServerResult::CallToolResult(self_clone.greet(params)))
                         }
-                        unknown => {
-                            return Err(ErrorData::new(
-                                ErrorCode::METHOD_NOT_FOUND,
-                                format!("unknown tool: {}", unknown),
-                                None,
-                            ));
-                        }
-                    };
-                    result
+                        unknown => Err(ErrorData::new(
+                            ErrorCode::METHOD_NOT_FOUND,
+                            format!("unknown tool: {}", unknown),
+                            None,
+                        )),
+                    }
                 }
                 // Pass through other requests as empty results
                 _ => Ok(ServerResult::EmptyResult(rmcp::model::EmptyObject {})),
@@ -256,12 +251,12 @@ impl Service<RoleServer> for TestMcpServer {
         }
     }
 
-    fn handle_notification(
+    async fn handle_notification(
         &self,
         _notification: rmcp::model::ClientNotification,
         _context: rmcp::service::NotificationContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<(), ErrorData>> + Send + '_ {
-        async move { Ok(()) }
+    ) -> Result<(), ErrorData> {
+        async move { Ok(()) }.await
     }
 
     fn get_info(&self) -> rmcp::model::ServerInfo {
@@ -277,7 +272,10 @@ impl Service<RoleServer> for TestMcpServer {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::new("test_mcp_server=info,rmcp=info");
-    tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 
     // Serve over stdio — must use stderr for logging
     let transport = (tokio::io::stdin(), tokio::io::stdout());

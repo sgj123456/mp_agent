@@ -20,13 +20,3 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
         })
         .collect()
 }
-
-/// Strip Markdown markup and return plain text.
-///
-/// We render the Markdown through `tui-markdown` and then read the resulting
-/// `ratatui::Text` back as a plain string, which gives us a reasonably clean
-/// textual representation without pulling in `pulldown-cmark` directly.
-#[allow(dead_code)]
-pub fn strip_markdown(text: &str) -> String {
-    from_str(text).to_string()
-}
