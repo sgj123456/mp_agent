@@ -119,9 +119,13 @@ mp_agent 附带了一套完整的工具使用指南，通过系统提示注入�
 ### 安装
 
 ```bash
-git clone <repo-url>
+# 方式一：从源码构建
+git clone https://github.com/sgj123456/mp_agent.git
 cd mp_agent
 cargo build --release
+
+# 方式二：直接用 cargo 安装（更快）
+cargo install --git https://github.com/sgj123456/mp_agent.git
 ```
 
 ### 配置
