@@ -158,7 +158,7 @@ model = "gpt-4o"
 ### 运行
 
 ```bash
-cargo run
+cargo run --bin mp_agent
 ```
 
 或者使用 release 版本：

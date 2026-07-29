@@ -386,13 +386,19 @@ impl ChatArea {
                 lines.push(header);
             }
             let content_offset = self.total_lines_cache + 1;
-            for (i, line_text) in preview_text.lines().enumerate() {
+            let rendered = markdown::render_markdown(preview_text);
+            for (i, md_line) in rendered.iter().enumerate() {
                 let lg = content_offset + i;
                 if lg >= soff && lg < eoff {
-                    lines.push(Self::card_body_line(line_text, TEXT, false));
+                    let mut prefixed = vec![Span::styled(
+                        "  ",
+                        Style::default().fg(TEXT).add_modifier(Modifier::DIM),
+                    )];
+                    prefixed.extend(md_line.spans.clone());
+                    lines.push(Line::from(prefixed));
                 }
             }
-            let cursor_pos = content_offset + preview_text.lines().count();
+            let cursor_pos = content_offset + rendered.len();
             if cursor_pos >= soff && cursor_pos < eoff {
                 lines.push(Line::from(Span::styled("  ▋", Style::default().fg(CYAN))));
             }

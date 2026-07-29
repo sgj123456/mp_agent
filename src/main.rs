@@ -10,17 +10,19 @@ use std::io;
 use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::event::{Event, EventStream};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream,
 };
+use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use app::App;
 use config::Config;
+
+type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,6 +52,7 @@ async fn main() -> Result<()> {
         stdout,
         EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
+        EnableBracketedPaste,
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -63,6 +66,7 @@ async fn main() -> Result<()> {
         terminal.backend_mut(),
         LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture,
+        DisableBracketedPaste,
     )?;
     terminal.show_cursor()?;
 
@@ -73,10 +77,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+async fn run_app(terminal: &mut Term, app: &mut App) -> Result<()> {
     // Use crossterm's async EventStream so input events are delivered
     // immediately without blocking on poll(). This eliminates the perceived
     // latency for both keyboard and mouse (wheel) input.
@@ -98,6 +99,7 @@ async fn run_app(
                 match event {
                     Event::Key(key) => app.handle_key_event(key),
                     Event::Mouse(mouse) => app.handle_mouse_event(mouse),
+                    Event::Paste(text) => app.handle_paste(&text),
                     _ => {}
                 }
             }

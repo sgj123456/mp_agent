@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "test_mcp_server"
-path = "bin/test_mcp_server.rs"
+name = "mcp-git"
+path = "bin/mcp_git.rs"
+
+[[bin]]
+name = "mcp-dev"
+path = "bin/mcp_dev.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

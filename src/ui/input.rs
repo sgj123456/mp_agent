@@ -11,6 +11,8 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show help information"),
     ("/clear", "Clear chat history"),
     ("/model", "Show or change model"),
+    ("/skills", "List loaded skills"),
+    ("/skill:", "Load a skill (Tab for names)"),
     ("/tools", "List available tools"),
     ("/exit", "Exit the application"),
     ("/history", "Show command history"),
@@ -71,6 +73,8 @@ pub struct InputArea {
     hint_index: usize,
     /// AI-predicted next user input, shown as gray text when buffer is empty.
     predicted_input: Option<String>,
+    /// Skill names for `/skill:` tab completion.
+    skill_names: Vec<String>,
 }
 
 impl InputArea {
@@ -85,12 +89,26 @@ impl InputArea {
             context_suggestions: Vec::new(),
             hint_index: 0,
             predicted_input: None,
+            skill_names: Vec::new(),
         }
+    }
+
+    /// Set available skill names for `/skill:` completion.
+    pub fn set_skill_names(&mut self, names: Vec<String>) {
+        self.skill_names = names;
     }
 
     pub fn insert_char(&mut self, c: char) {
         self.buffer.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
+        self.tab_suggestion = None;
+    }
+
+    /// Insert a string at the cursor position (handles pasted text).
+    /// Treats `\n` as a literal newline character, avoiding spurious submission.
+    pub fn insert_text(&mut self, text: &str) {
+        self.buffer.insert_str(self.cursor_pos, text);
+        self.cursor_pos += text.len();
         self.tab_suggestion = None;
     }
 
@@ -331,49 +349,38 @@ impl InputArea {
             return;
         }
 
-        if input.is_empty() || input.starts_with('/') {
-            let partial = input.to_lowercase();
-            let matches: Vec<SuggestionItem> = self
-                .matching_commands()
+        let partial = input.to_lowercase();
+        let matches: Vec<SuggestionItem> = if input.starts_with('/') {
+            self.matching_commands()
                 .into_iter()
                 .filter(|s| s.label().to_lowercase().starts_with(&partial))
-                .collect();
-
-            if matches.len() == 1 {
-                self.buffer = matches[0].label();
-                self.cursor_pos = self.buffer.len();
-            } else if !matches.is_empty() {
-                let labels: Vec<String> = matches.iter().map(|s| s.label()).collect();
-                let common_prefix = common_prefix_str(&labels);
-                if common_prefix.len() > self.buffer.len() {
-                    self.buffer = common_prefix;
-                    self.cursor_pos = self.buffer.len();
-                } else {
-                    self.tab_suggestion = Some(matches[0].label());
-                }
-            }
+                .collect()
         } else {
-            // Non-slash input: tab-complete against context suggestions.
-            let partial = input.to_lowercase();
-            let matches: Vec<SuggestionItem> = self
-                .context_suggestions
+            self.context_suggestions
                 .iter()
                 .filter(|s| s.label().to_lowercase().starts_with(&partial))
                 .cloned()
-                .collect();
+                .collect()
+        };
 
-            if matches.len() == 1 {
-                self.buffer = matches[0].label();
+        self.apply_completion(matches);
+    }
+
+    /// Common tab-completion logic: given a list of filtered matches, fill the
+    /// buffer with the single match, or the common prefix of multiple matches,
+    /// or save the first match as a preview for next Tab press.
+    fn apply_completion(&mut self, matches: Vec<SuggestionItem>) {
+        if matches.len() == 1 {
+            self.buffer = matches[0].label();
+            self.cursor_pos = self.buffer.len();
+        } else if !matches.is_empty() {
+            let labels: Vec<String> = matches.iter().map(|s| s.label()).collect();
+            let common_prefix = common_prefix_str(&labels);
+            if common_prefix.len() > self.buffer.len() {
+                self.buffer = common_prefix;
                 self.cursor_pos = self.buffer.len();
-            } else if !matches.is_empty() {
-                let labels: Vec<String> = matches.iter().map(|s| s.label()).collect();
-                let common_prefix = common_prefix_str(&labels);
-                if common_prefix.len() > self.buffer.len() {
-                    self.buffer = common_prefix;
-                    self.cursor_pos = self.buffer.len();
-                } else {
-                    self.tab_suggestion = Some(matches[0].label());
-                }
+            } else {
+                self.tab_suggestion = Some(matches[0].label());
             }
         }
     }
@@ -395,11 +402,23 @@ impl InputArea {
 
         if input.starts_with('/') {
             let partial = input.to_lowercase();
-            SLASH_COMMANDS
+            let mut cmds: Vec<SuggestionItem> = SLASH_COMMANDS
                 .iter()
                 .filter(|(cmd, _)| cmd.starts_with(&partial))
                 .map(|(cmd, desc)| SuggestionItem::SlashCommand(cmd, desc))
-                .collect()
+                .collect();
+
+            // Dynamic /skill: completions from loaded skill names
+            if partial.starts_with("/skill:") && !self.skill_names.is_empty() {
+                let filter = partial.strip_prefix("/skill:").unwrap_or("");
+                for name in &self.skill_names {
+                    if name.to_lowercase().starts_with(filter) {
+                        cmds.push(SuggestionItem::Context(format!("/skill:{}", name)));
+                    }
+                }
+            }
+
+            cmds
         } else {
             // Non-slash input: match against context suggestions only.
             let partial = input.to_lowercase();

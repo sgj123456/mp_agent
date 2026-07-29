@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use unicode_width::UnicodeWidthChar;
 
 use crate::agent::skill;
+use crate::agent::skill::Skill;
 use crate::agent::{Agent, AgentEvent, ChoiceResult};
 use crate::config::Config;
 use crate::mcp::McpManager;
@@ -75,6 +76,8 @@ pub struct App {
     streamed_tokens: u64,
     /// Model's maximum context window (in tokens).
     context_limit: u64,
+    /// Loaded skills metadata.
+    skills: Vec<Skill>,
     /// Message queue for user inputs arriving while the agent is processing.
     /// Inputs typed during processing are buffered and sent sequentially once
     /// the current turn is done.
@@ -102,9 +105,9 @@ impl App {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-        let skills = skill::load_all_skills();
+        let loaded_skills = skill::load_all_skills();
         let agents_md = skill::load_agents_md();
-        let system_prompt = skill::build_system_prompt(&skills, agents_md.as_deref());
+        let system_prompt = skill::build_system_prompt(&loaded_skills, agents_md.as_deref());
 
         let context_limit = model_context_limit(&config.model);
 
@@ -122,7 +125,10 @@ impl App {
             let _ = cmd_tx.send(AgentCommand::ConnectMcp);
         }
 
-        App {
+        let mut skill_names: Vec<String> = loaded_skills.iter().map(|s| s.name.clone()).collect();
+        skill_names.sort();
+
+        let mut app = App {
             chat: ChatArea::new(),
             input: InputArea::new(),
             running: true,
@@ -147,6 +153,7 @@ impl App {
             prompt_tokens_session: 0,
             streamed_tokens: 0,
             context_limit,
+            skills: loaded_skills,
             pending_messages: Vec::new(),
             selection: None,
             left_button_down: false,
@@ -154,7 +161,10 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             input_area: Rect::default(),
             chat_area: Rect::default(),
-        }
+        };
+
+        app.input.set_skill_names(skill_names);
+        app
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) {
@@ -390,6 +400,16 @@ impl App {
         }
     }
 
+    /// Handle pasted text — insert it at the cursor position in the input area.
+    /// Pasted newlines are treated as literal characters, not submission triggers.
+    pub fn handle_paste(&mut self, text: &str) {
+        // If the choice or permission panel is open, ignore paste.
+        if !self.pending_choice.is_empty() || self.pending_permission.is_some() {
+            return;
+        }
+        self.input.insert_text(text);
+    }
+
     fn handle_choice_key(&mut self, key: &KeyEvent) -> bool {
         // Work on the topmost pending choice (most recent).
         let count = self.pending_choice.len();
@@ -497,6 +517,8 @@ impl App {
                      - `/help` - Show this help\n\
                      - `/clear` - Clear chat history\n\
                      - `/model` - Show current model\n\
+                     - `/skills` - List loaded skills\n\
+                     - `/skill:<name>` - Load and show a skill's content\n\
                      - `/tools` - List available tools\n\
                      - `/exit` - Exit the application\n\n\
                      **Keyboard Shortcuts:**\n\
@@ -538,6 +560,100 @@ impl App {
                     )
                 };
                 self.chat.add_message(ChatMessage::System(msg));
+                self.input.clear();
+            }
+            cmd if cmd.starts_with("/skill:") => {
+                let name = input.trim().to_lowercase().strip_prefix("/skill:").unwrap_or("").trim().to_string();
+                if name.is_empty() {
+                    self.chat.add_message(ChatMessage::Error("Usage: `/skill:<name>` — load a skill by name".to_string()));
+                } else {
+                    let matched: Vec<&Skill> = self.skills.iter().filter(|s| s.name.eq_ignore_ascii_case(&name)).collect();
+                    if matched.is_empty() {
+                        self.chat.add_message(ChatMessage::Error(format!("Skill '{}' not found. Use `/skills` to list available skills.", name)));
+                    } else {
+                        let s = matched[0];
+                        match std::fs::read_to_string(&s.path) {
+                            Ok(content) => {
+                                let msg = format!("### {}\n\n```\n{}\n```", s.name, content);
+                                self.chat.add_message(ChatMessage::System(msg));
+                            }
+                            Err(e) => {
+                                self.chat.add_message(ChatMessage::Error(format!("Failed to read skill file `{}`: {}", s.path.display(), e)));
+                            }
+                        }
+                    }
+                }
+                self.input.clear();
+            }
+            "/skills" => {
+                if self.skills.is_empty() {
+                    self.chat.add_message(ChatMessage::System("No skills loaded.".to_string()));
+                    self.input.clear();
+                    return;
+                }
+
+                let query = args.trim();
+
+                // Level 1: no args — list names only
+                if query.is_empty() {
+                    let mut msg = format!("**Skills ({}):**  _Type `/skills -l` for details or `/skill:<name>` to inspect._\n\n", self.skills.len());
+                    for s in &self.skills {
+                        msg.push_str(&format!("- `{}`\n", s.name));
+                    }
+                    self.chat.add_message(ChatMessage::System(msg));
+                }
+                // Level 2: full metadata for all
+                else if query == "-l" || query == "--long" {
+                    let mut msg = format!("**Loaded Skills ({}):**\n\n", self.skills.len());
+                    for s in &self.skills {
+                        msg.push_str(&format!("### {}\n", s.name));
+                        msg.push_str(&format!("{}\n\n", s.description));
+                        if !s.triggers.is_empty() {
+                            msg.push_str("Triggers: ");
+                            msg.push_str(&s.triggers.join(", "));
+                            msg.push('\n');
+                        }
+                        msg.push_str(&format!("Path: `{}`\n\n", s.path.display()));
+                    }
+                    self.chat.add_message(ChatMessage::System(msg));
+                }
+                else {
+                    // Parse optional --read flag at end of query
+                    let (name, read_mode) = if let Some(rest) = query.strip_suffix(" --read").or_else(|| query.strip_suffix(" -r")) {
+                        (rest.trim().to_string(), true)
+                    } else {
+                        (query.to_string(), false)
+                    };
+
+                    let matched: Vec<&Skill> = self.skills.iter().filter(|s| s.name.eq_ignore_ascii_case(&name)).collect();
+
+                    if matched.is_empty() {
+                        self.chat.add_message(ChatMessage::Error(format!("Skill '{}' not found. Use `/skills` to list available skills.", name)));
+                    } else {
+                        let s = matched[0];
+                        if read_mode {
+                            // Read and show full file content
+                            match std::fs::read_to_string(&s.path) {
+                                Ok(content) => {
+                                    let msg = format!("### {} — Full content\n\n```\n{}\n```", s.name, content);
+                                    self.chat.add_message(ChatMessage::System(msg));
+                                }
+                                Err(e) => {
+                                    self.chat.add_message(ChatMessage::Error(format!("Failed to read `{}`: {}", s.path.display(), e)));
+                                }
+                            }
+                        } else {
+                            // Show metadata for this skill
+                            let mut msg = format!("### {}\n\n{}\n\n", s.name, s.description);
+                            if !s.triggers.is_empty() {
+                                msg.push_str(&format!("**Triggers:** {}\n\n", s.triggers.join(", ")));
+                            }
+                            msg.push_str(&format!("**Path:** `{}`\n\n", s.path.display()));
+                            msg.push_str(&format!("_Use `/skill:{}` or `/skills {} --read` to read the full file._", s.name, s.name));
+                            self.chat.add_message(ChatMessage::System(msg));
+                        }
+                    }
+                }
                 self.input.clear();
             }
             "/tools" => {
@@ -905,7 +1021,7 @@ impl App {
                 let prompt = format!(
                     " 【Permission】{} {} | {}  [y]es [a]lways [n]o [d]eny [Esc]",
                     op,
-                    crate::permission::truncate(path, 60),
+                    crate::agent::truncate(path, 60),
                     desc
                 );
                 let status = Paragraph::new(Line::from(Span::styled(

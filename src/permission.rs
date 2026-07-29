@@ -79,17 +79,6 @@ pub fn match_rule(
     None
 }
 
-/// Truncate a string for display at a reasonable length.
-pub fn truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() > max {
-        let truncated: String = chars[..max].iter().collect();
-        format!("{}...", truncated)
-    } else {
-        s.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,25 +184,6 @@ mod tests {
         let rules: Vec<PermissionRule> = vec![];
         let result = match_rule(&rules, &PermissionOp::Write, "/tmp/test.txt");
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_truncate_short_string() {
-        let result = truncate("hello", 10);
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn test_truncate_long_string() {
-        let result = truncate("hello world this is a long string", 5);
-        assert_eq!(result, "hello...");
-        assert_eq!(result.len(), 8); // 5 chars + "..."
-    }
-
-    #[test]
-    fn test_truncate_exact_boundary() {
-        let result = truncate("hello", 5);
-        assert_eq!(result, "hello");
     }
 
     #[test]

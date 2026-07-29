@@ -121,7 +121,11 @@ impl Config {
 
     pub fn from_env() -> color_eyre::Result<Self> {
         dotenvy::dotenv().ok();
+        Self::from_env_vars()
+    }
 
+    /// Read config from environment variables directly (no dotenv reload).
+    pub(crate) fn from_env_vars() -> color_eyre::Result<Self> {
         let api_key = env::var("OPENAI_API_KEY")
             .map_err(|_| color_eyre::eyre::eyre!("OPENAI_API_KEY not set in .env"))?;
 
@@ -159,25 +163,6 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn from_env_isolated() -> color_eyre::Result<Config> {
-        let api_key = env::var("OPENAI_API_KEY")
-            .map_err(|_| color_eyre::eyre::eyre!("OPENAI_API_KEY not set"))?;
-        let base_url = env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string())
-            .trim_end_matches('/')
-            .to_string();
-        let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-        let max_tokens = env::var("OPENAI_MAX_TOKENS")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok());
-        Ok(Config {
-            api_key,
-            base_url,
-            model,
-            max_tokens,
-        })
-    }
-
     fn with_clean_env<F: FnOnce()>(f: F) {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -214,7 +199,7 @@ mod tests {
                 std::env::set_var("OPENAI_MODEL", "test-model");
                 std::env::set_var("OPENAI_MAX_TOKENS", "4096");
             }
-            let config = from_env_isolated().unwrap();
+            let config = Config::from_env_vars().unwrap();
             assert_eq!(config.api_key, "sk-test-key");
             assert_eq!(config.base_url, "https://custom.example.com/v1");
             assert_eq!(config.model, "test-model");
@@ -228,7 +213,7 @@ mod tests {
             unsafe {
                 std::env::set_var("OPENAI_API_KEY", "sk-test-key");
             }
-            let config = from_env_isolated().unwrap();
+            let config = Config::from_env_vars().unwrap();
             assert_eq!(config.base_url, "https://api.openai.com/v1");
             assert_eq!(config.model, "gpt-4o");
             assert_eq!(config.max_tokens, None);
@@ -242,7 +227,7 @@ mod tests {
                 std::env::set_var("OPENAI_API_KEY", "sk-test-key");
                 std::env::set_var("OPENAI_BASE_URL", "https://api.example.com/v1/");
             }
-            let config = from_env_isolated().unwrap();
+            let config = Config::from_env_vars().unwrap();
             assert_eq!(config.base_url, "https://api.example.com/v1");
         });
     }
@@ -254,7 +239,7 @@ mod tests {
                 std::env::set_var("OPENAI_API_KEY", "sk-test-key");
                 std::env::set_var("OPENAI_MAX_TOKENS", "invalid");
             }
-            let config = from_env_isolated().unwrap();
+            let config = Config::from_env_vars().unwrap();
             assert_eq!(config.max_tokens, None);
         });
     }
