@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
@@ -85,6 +85,56 @@ impl InputArea {
             self.buffer.drain(prev..self.cursor_pos);
             self.cursor_pos = prev;
         }
+        self.tab_suggestion = None;
+    }
+
+    /// Set cursor to the buffer position closest to a mouse click at the given
+    /// (row, col) within the input's content area (0-indexed, excluding borders).
+    pub fn set_cursor_by_click(&mut self, row: u16, col: u16, content_width: u16) {
+        if content_width == 0 {
+            return;
+        }
+        let cw = content_width as usize;
+        let target_line = row as usize;
+        let target_col = col as usize;
+
+        let mut visual_line = 0usize;
+        let mut visual_col = 0usize;
+        let mut cursor = 0usize;
+
+        for (byte_idx, c) in self.buffer.char_indices() {
+            if visual_line > target_line {
+                break;
+            }
+            cursor = byte_idx;
+            if visual_line == target_line && visual_col >= target_col {
+                break;
+            }
+            match c {
+                '\n' => {
+                    if visual_line == target_line {
+                        break;
+                    }
+                    visual_line += 1;
+                    visual_col = 0;
+                }
+                _ => {
+                    let w = c.width().unwrap_or(0);
+                    if visual_col > 0 && visual_col + w > cw {
+                        visual_line += 1;
+                        visual_col = w;
+                        if visual_line > target_line {
+                            cursor = byte_idx;
+                            break;
+                        }
+                    } else {
+                        visual_col += w;
+                    }
+                }
+            }
+        }
+
+        self.cursor_pos = cursor;
         self.tab_suggestion = None;
     }
 
@@ -476,51 +526,58 @@ impl InputArea {
         let content_width = area.width.saturating_sub(2);
         let buffer = &self.buffer;
         let is_slash_command = buffer.starts_with('/');
-
-        let mut spans = Vec::new();
         let ghost_suffix = self.ghost_suffix_text();
 
-        if is_slash_command {
+        let paragraph = if is_slash_command {
+            // Slash commands are single-line, keep current rendering
             let input_lower = buffer.to_lowercase();
             let matched = SLASH_COMMANDS.iter().any(|(cmd, _)| cmd == &input_lower);
-
             let style = if matched {
                 Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(RED).add_modifier(Modifier::BOLD)
             };
-
             let parts: Vec<&str> = buffer.splitn(2, ' ').collect();
-            spans.push(Span::styled(parts[0].to_string(), style));
+            let mut spans = vec![Span::styled(parts[0].to_string(), style)];
             if parts.len() > 1 {
                 spans.push(Span::styled(
                     format!(" {}", parts[1]),
                     Style::default().fg(TEXT),
                 ));
             }
+            Paragraph::new(Line::from(spans))
         } else if !buffer.is_empty() {
-            spans.push(Span::styled(buffer.clone(), Style::default().fg(TEXT)));
-            if let Some(suffix) = &ghost_suffix {
-                spans.push(Span::styled(suffix.clone(), Style::default().fg(TEXT_DIM)));
+            // Split at \n so Ratatui renders hard line breaks
+            let segments: Vec<&str> = buffer.split('\n').collect();
+            let mut lines: Vec<Line> = segments
+                .iter()
+                .map(|s| Line::from(Span::styled(s.to_string(), Style::default().fg(TEXT))))
+                .collect();
+            // Append ghost suffix to the last line
+            if let Some(suffix) = &ghost_suffix
+                && let Some(last) = lines.last_mut()
+            {
+                last.push_span(Span::styled(suffix.clone(), Style::default().fg(TEXT_DIM)));
             }
+            Paragraph::new(Text::from(lines))
         } else if let Some(first) = self.context_suggestions.first() {
-            spans.push(Span::styled(
+            Paragraph::new(Line::from(Span::styled(
                 first.label(),
                 Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
-            ));
+            )))
         } else {
-            spans.push(Span::styled(
+            Paragraph::new(Line::from(Span::styled(
                 " ▸ Type a message... (/help for commands)",
                 Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
-            ));
-        }
+            )))
+        };
 
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Input ")
             .border_style(Style::default().fg(if is_slash_command { CYAN } else { TEXT_DIM }));
 
-        let paragraph = Paragraph::new(Line::from(spans))
+        let paragraph = paragraph
             .block(block)
             .wrap(Wrap { trim: false })
             .style(Style::default().bg(BG));

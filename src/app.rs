@@ -82,6 +82,9 @@ pub struct App {
     /// Persistent clipboard handle so clipboard managers on Linux have time
     /// to read the contents (avoid "dropped very quickly" warnings).
     clipboard: Option<arboard::Clipboard>,
+    /// Most recent input area rectangle, updated on every draw.
+    /// Used to detect mouse clicks inside the input area for cursor positioning.
+    input_area: Rect,
 }
 
 impl App {
@@ -140,6 +143,7 @@ impl App {
             left_button_down: false,
             chat_plain_lines: Vec::new(),
             clipboard: arboard::Clipboard::new().ok(),
+            input_area: Rect::default(),
         }
     }
 
@@ -311,6 +315,18 @@ impl App {
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                // Check if click is inside the input area
+                let mx = mouse.column;
+                let my = mouse.row;
+                let ia = self.input_area;
+                if my > ia.y && my < ia.y + ia.height - 1 && mx > ia.x && mx < ia.x + ia.width - 1 {
+                    let content_width = ia.width.saturating_sub(2);
+                    let row = my - (ia.y + 1);
+                    let col = mx - (ia.x + 1);
+                    self.input.set_cursor_by_click(row, col, content_width);
+                    return;
+                }
+                // Otherwise handle as chat click
                 self.left_button_down = true;
                 let row = mouse.row as usize;
                 let scroll = self.chat.scroll_offset() as usize;
@@ -698,6 +714,7 @@ impl App {
             let chat_area = layout.chat;
             let input_area = layout.input;
             let status_area = layout.status;
+            self.input_area = input_area;
 
             if !self.streaming_buffer.is_empty() {
                 self.chat
