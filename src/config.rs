@@ -1,4 +1,9 @@
+use serde::Deserialize;
 use std::env;
+use std::path::{Path, PathBuf};
+
+/// The default config file name (part of the path, not full).
+const CONFIG_FILE: &str = "config.toml";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -8,7 +13,112 @@ pub struct Config {
     pub max_tokens: Option<u32>,
 }
 
+/// Find the first existing config file: project → global user config.
+pub fn find_config_path() -> Option<PathBuf> {
+    let project = Path::new(".mp_agent").join(CONFIG_FILE);
+    if project.exists() {
+        return Some(project);
+    }
+    global_config_dir()
+        .map(|d| d.join(CONFIG_FILE))
+        .filter(|p| p.exists())
+}
+
+/// Return the global mp_agent config directory (e.g. `~/.config/mp_agent/` on Linux,
+/// `%APPDATA%/mp_agent/` on Windows).
+pub fn global_config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("mp_agent"))
+}
+
+/// Generate a default config file at the global path if none exists.
+/// Also creates the global config directory and skills directory.
+fn generate_default_config(path: &Path) -> color_eyre::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to create config dir: {}", e))?;
+        // Also create the global skills directory alongside config
+        let skills_dir = parent.join("skills");
+        let _ = std::fs::create_dir_all(&skills_dir);
+    }
+    let template = r#"# mp_agent configuration
+#
+# Get your API key from your OpenAI-compatible provider.
+# Then edit the value below and save this file.
+
+[api]
+api_key = "your-api-key-here"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+# max_tokens = 4096
+
+# Uncomment and configure MCP servers below:
+# [mcp.servers]
+# [mcp.servers.example]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# enabled = true
+"#;
+    std::fs::write(path, template)
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to create {}: {}", path.display(), e))?;
+    tracing::info!("Generated default config at {}", path.display());
+    Ok(())
+}
+
 impl Config {
+    /// Load config from project or global TOML, auto-generating a default
+    /// global config if neither exists. Falls back to `.env` as a last resort.
+    pub fn load() -> color_eyre::Result<Self> {
+        if let Some(config_path) = find_config_path() {
+            let contents = std::fs::read_to_string(&config_path).map_err(|e| {
+                color_eyre::eyre::eyre!("Failed to read {}: {}", config_path.display(), e)
+            })?;
+            return Self::from_toml_str(&contents);
+        }
+        // No config file exists — generate a default at the global location.
+        if let Some(global_dir) = global_config_dir() {
+            let global_path = global_dir.join(CONFIG_FILE);
+            if let Err(e) = generate_default_config(&global_path) {
+                tracing::warn!("Could not generate default config: {}", e);
+            } else {
+                let contents = std::fs::read_to_string(&global_path).map_err(|e| {
+                    color_eyre::eyre::eyre!("Failed to read {}: {}", global_path.display(), e)
+                })?;
+                return Self::from_toml_str(&contents);
+            }
+        }
+        Self::from_env()
+    }
+
+    fn from_toml_str(toml_str: &str) -> color_eyre::Result<Self> {
+        #[derive(Deserialize)]
+        struct TomlConfig {
+            api: ApiConfig,
+        }
+        #[derive(Deserialize)]
+        struct ApiConfig {
+            api_key: String,
+            base_url: Option<String>,
+            model: Option<String>,
+            max_tokens: Option<u32>,
+        }
+        let tc: TomlConfig = toml::from_str(toml_str)
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to parse config.toml: {}", e))?;
+        Ok(Config {
+            api_key: tc.api.api_key,
+            base_url: tc
+                .api
+                .base_url
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            model: tc.api.model.unwrap_or_else(|| "gpt-4o".to_string()),
+            max_tokens: tc.api.max_tokens,
+        })
+    }
+
     pub fn from_env() -> color_eyre::Result<Self> {
         dotenvy::dotenv().ok();
 

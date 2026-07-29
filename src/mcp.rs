@@ -2,6 +2,7 @@ use rmcp::model::Tool as McpTool;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -24,13 +25,25 @@ fn default_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpConfig {
     #[serde(default)]
     pub servers: HashMap<String, McpServerConfig>,
 }
 
 impl McpConfig {
+    /// Parse McpConfig from the `[mcp]` section of a unified TOML config.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct Toplevel {
+            #[serde(default)]
+            mcp: Option<McpConfig>,
+        }
+        let toplevel: Toplevel =
+            toml::from_str(toml_str).map_err(|e| format!("Failed to parse TOML: {}", e))?;
+        Ok(toplevel.mcp.unwrap_or_default())
+    }
+
     pub fn from_file(path: &str) -> Result<Self, String> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read MCP config {}: {}", path, e))?;
@@ -58,9 +71,46 @@ impl McpManager {
     pub fn new() -> Self {
         McpManager {
             connections: HashMap::new(),
-            config: McpConfig {
-                servers: HashMap::new(),
-            },
+            config: McpConfig::default(),
+        }
+    }
+
+    /// Load MCP config from the project's or global unified config file.
+    /// Tries `.mp_agent/config.toml` → global config → `mcp_servers.json`.
+    pub fn from_project() -> Self {
+        // Try project-level config
+        let project_path = Path::new(".mp_agent/config.toml");
+        if let Some(manager) = Self::try_load_toml(project_path) {
+            return manager;
+        }
+        // Try global user-level config
+        if let Some(global_dir) = crate::config::global_config_dir() {
+            let global_path = global_dir.join("config.toml");
+            if let Some(manager) = Self::try_load_toml(&global_path) {
+                return manager;
+            }
+        }
+        // Fall back to legacy JSON
+        if Path::new("mcp_servers.json").exists()
+            && let Ok(manager) = McpManager::from_config("mcp_servers.json")
+        {
+            return manager;
+        }
+        McpManager::new()
+    }
+
+    /// Try to load MCP config from a TOML file at the given path.
+    fn try_load_toml(path: &Path) -> Option<Self> {
+        if path.exists()
+            && let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(config) = McpConfig::from_toml_str(&contents)
+        {
+            Some(McpManager {
+                connections: HashMap::new(),
+                config,
+            })
+        } else {
+            None
         }
     }
 

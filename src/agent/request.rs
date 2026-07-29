@@ -197,19 +197,13 @@ pub async fn parse_stream(
                 // so serde doesn't choke on empty `usage: {}` (CompletionUsage
                 // requires prompt_tokens to be present).
                 if let Some(usage) = value.get("usage").and_then(|u| u.as_object()) {
-                    if let Some(prompt) = usage
-                        .get("prompt_tokens")
-                        .and_then(|v| v.as_u64())
-                    {
+                    if let Some(prompt) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
                         let completion = usage
                             .get("completion_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                         if let Some(ref tx) = event_tx {
-                            let _ = tx.send(AgentEvent::TokenUsage {
-                                prompt,
-                                completion,
-                            });
+                            let _ = tx.send(AgentEvent::TokenUsage { prompt, completion });
                         }
                     }
                     // If choices are empty this is a usage-only chunk after

@@ -30,6 +30,7 @@ unicode-width = "0.2"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 schemars = "0.8"
 anyhow = "1"
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

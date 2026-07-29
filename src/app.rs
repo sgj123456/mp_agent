@@ -96,18 +96,8 @@ impl App {
         let last_model = config.model.clone();
         let context_limit = model_context_limit(&last_model);
 
-        // Initialize MCP manager from configuration file if present
-        let mcp_manager = if std::path::Path::new("mcp_servers.json").exists() {
-            match McpManager::from_config("mcp_servers.json") {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!("Failed to load MCP config: {}", e);
-                    McpManager::new()
-                }
-            }
-        } else {
-            McpManager::new()
-        };
+        // Initialize MCP manager from unified config file (TOML or JSON fallback)
+        let mcp_manager = McpManager::from_project();
 
         // Determine if there are any configured MCP servers
         let has_mcp_servers = mcp_manager.config_has_servers();
@@ -887,7 +877,12 @@ impl App {
                 };
                 let status_text = format!(
                     "▌ {} │ {} │ {} tools{} │  {}{}",
-                    self.last_model, cwd_short, self.tool_count, ctx_text, symbol, self.status_message
+                    self.last_model,
+                    cwd_short,
+                    self.tool_count,
+                    ctx_text,
+                    symbol,
+                    self.status_message
                 );
                 let status = Paragraph::new(Line::from(Span::styled(
                     status_text.trim(),

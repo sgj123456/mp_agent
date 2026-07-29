@@ -39,7 +39,7 @@
 │       └── layout.rs   # 布局工具
 ├── tests/              # 集成测试
 ├── docs/               # 额外文档
-└── .opencode/skills/   # 自定义技能目录（可选）
+└── .mp_agent/skills/   # 自定义技能目录（可选）
 ```
 
 ## 开发工作流
@@ -136,8 +136,8 @@ mp_agent 提供了一套内置工具，Agent 应遵循以下最佳实践：
 
 Agent 会自动从以下目录加载技能文件（`.md` / `.txt` / `.skill`）：
 
-- `./.opencode/skills/`
-- `$HOME/.config/opencode/skills/`
+- `./.mp_agent/skills/`
+- `$HOME/.config/mp_agent/skills/`
 
 技能文件格式：
 ```

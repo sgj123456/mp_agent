@@ -65,14 +65,14 @@ pub fn load_skills_from_dir(dir: &Path) -> Vec<Skill> {
 pub fn load_all_skills() -> Vec<Skill> {
     let mut skills = Vec::new();
 
-    // Load from .opencode/skills/
+    // Load from .mp_agent/skills/
     if let Ok(cwd) = std::env::current_dir() {
-        let skills_dir = cwd.join(".opencode").join("skills");
+        let skills_dir = cwd.join(".mp_agent").join("skills");
         skills.extend(load_skills_from_dir(&skills_dir));
 
         // Also check home directory
         if let Some(home) = dirs::home_dir() {
-            let home_skills = home.join(".config").join("opencode").join("skills");
+            let home_skills = home.join(".config").join("mp_agent").join("skills");
             skills.extend(load_skills_from_dir(&home_skills));
         }
     }

@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let config = Config::from_env()?;
+    let config = Config::load()?;
     tracing::info!("Loaded config, model: {}", config.model);
 
     enable_raw_mode()?;
