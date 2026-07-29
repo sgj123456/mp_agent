@@ -25,47 +25,71 @@
 | 终端 | 支持 UTF-8 | 推荐使用现代终端（iTerm2、kitty、alacritty、Windows Terminal 等） |
 | API | OpenAI 兼容 endpoint | OpenAI API 或其他兼容 SSE 流的 endpoint |
 
-## 2. 环境变量
+## 2. 配置文件
 
-mp_agent 通过 `.env` 文件加载配置，使用 `dotenvy` crate 读取。
+mp_agent 使用 **TOML 格式**的统一配置文件。所有配置（API 密钥、模型参数、MCP 服务器）集中在一个文件中。
 
-### 2.1 `.env` 文件格式
+### 2.1 查找顺序
 
-在项目根目录创建 `.env` 文件（已被 `.gitignore` 排除，不会提交）：
+首次启动时，按以下优先级查找配置文件。如所有位置都不存在，则在全局目录自动生成默认配置。
 
-```env
-OPENAI_API_KEY=sk-your-api-key
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o
-OPENAI_MAX_TOKENS=5000
+| 优先级 | 路径 | 说明 |
+|--------|------|------|
+| 1 | `./.mp_agent/config.toml` | 项目级配置（覆盖全局） |
+| 2 | `~/.config/mp_agent/config.toml` (Linux) / `%APPDATA%\mp_agent\config.toml` (Windows) | 全局用户级配置 |
+
+### 2.2 文件格式
+
+```toml
+[api]
+api_key = "sk-your-api-key"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+max_tokens = 5000
+
+[mcp.servers]
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+enabled = true
 ```
 
-### 2.2 环境变量说明
+### 2.3 配置项说明
 
-| 变量 | 必填 | 默认值 | 说明 |
-|---|---|---|---|
-| `OPENAI_API_KEY` | ✅ 必须 | 无 | API 认证密钥 |
-| `OPENAI_BASE_URL` | ❌ 可选 | `https://api.openai.com/v1` | API 基础 URL（去除尾部斜杠） |
-| `OPENAI_MODEL` | ❌ 可选 | `gpt-4o` | 模型名称 |
-| `OPENAI_MAX_TOKENS` | ❌ 可选 | 无 | 最大 completion token 数（整数） |
+#### `[api]` 节
 
-### 2.3 使用兼容 API
+| 字段 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key` | ✅ 必须 | 无 | API 认证密钥 |
+| `base_url` | ❌ 可选 | `https://api.openai.com/v1` | API 基础 URL（尾部斜杠自动去除） |
+| `model` | ❌ 可选 | `gpt-4o` | 模型名称 |
+| `max_tokens` | ❌ 可选 | 无 | 最大 completion token 数（整数） |
 
-如果使用非 OpenAI 的兼容 API（如 Groq、Together AI、内部 endpoint），只需修改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`：
+#### `[mcp.servers]` 节
 
-```env
-# Groq
-OPENAI_API_KEY=sk-your-key
-OPENAI_BASE_URL=https://api.groq.com/openai/v1
-OPENAI_MODEL=llama3-70b-8192
+| 字段 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `command` | ✅ 必须 | 无 | MCP 服务器启动命令 |
+| `args` | ❌ 可选 | `[]` | 命令行参数 |
+| `enabled` | ❌ 可选 | `true` | 是否启用该服务器 |
+| `env` | ❌ 可选 | `{}` | 额外环境变量 |
 
-# 内部 endpoint
-OPENAI_API_KEY=sk-intern-key
-OPENAI_BASE_URL=https://chat.intern-ai.org.cn/api/v1
-OPENAI_MODEL=intern-latest
+### 2.4 使用兼容 API
+
+如果使用非 OpenAI 的兼容 API（如 Groq、Together AI、内部 endpoint），只需修改 `base_url` 和 `model`：
+
+```toml
+[api]
+api_key = "sk-your-key"
+base_url = "https://chat.intern-ai.org.cn/api/v1/"
+model = "intern-latest"
 ```
 
 **注意**：API 必须支持 OpenAI 兼容的 SSE 流式响应（`/chat/completions` endpoint + `stream=true`）。
+
+### 2.5 旧版兼容
+
+旧版 `.env` 文件（`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_MAX_TOKENS`）和 `mcp_servers.json` 仍被支持作为降级方案，当 `.mp_agent/config.toml` 和全局配置都不存在时自动使用。
 
 ## 3. 构建项目
 
@@ -135,18 +159,34 @@ RUST_LOG=debug cargo run
 
 ## 5. 配置 MCP 服务器
 
-当前 MCP 服务器连接需要在代码中硬配置（在 `App::new()` 中）。未来版本将通过配置文件支持动态注册。
+MCP 服务器通过在 `.mp_agent/config.toml` 或全局配置的 `[mcp.servers]` 节注册。
 
-示例（需要在 `src/app.rs` 的 `App::new()` 中添加）：
+### 5.1 示例
 
-```rust
-let _tools = mcp
-    .connect("filesystem".to_string(), "npx".to_string(), vec![
-        "@anthropic/mcp-server-filesystem".to_string(),
-        "/tmp".to_string(),
-    ])
-    .await;
+```toml
+[mcp.servers]
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+enabled = true
+
+[mcp.servers.git]
+command = "uvx"
+args = ["mcp-server-git"]
+enabled = true
+
+[mcp.servers.db]
+command = "npx"
+args = ["-y", "mcp-server-postgres", "postgresql://user:pass@localhost/db"]
+enabled = false
+env = { PGPASSWORD = "secret" }
 ```
+
+### 5.2 加载顺序
+
+1. 项目级配置 `.mp_agent/config.toml`
+2. 全局配置 `~/.config/mp_agent/config.toml`（Linux）或 `%APPDATA%/mp_agent/config.toml`（Windows）
+3. 旧版 `mcp_servers.json`（降级兼容）
 
 **注意**：MCP 服务器需要预先安装在系统中（如 `npx` 可访问对应包）。
 
@@ -154,7 +194,7 @@ let _tools = mcp
 
 参见 [技能系统](./06-skills.md)。简要步骤：
 
-1. 创建 `.opencode/skills/` 目录
+1. 创建 `.mp_agent/skills/` 目录（项目级）或 `~/.config/mp_agent/skills/`（全局级）
 2. 添加 `.skill` / `.md` / `.txt` 文件
 3. 第一行名称，第二行描述，后续正文
 4. 重启 Agent 生效
@@ -167,7 +207,7 @@ let _tools = mcp
 API error: HTTP 401 - {"error": {"message": "Invalid API key", ...}}
 ```
 
-**解决**：检查 `.env` 中的 `OPENAI_API_KEY` 是否正确，是否有前导/后导空格。
+**解决**：检查 `.mp_agent/config.toml` 中的 `api_key` 是否正确，是否有前导/后导空格。
 
 ### 7.2 连接超时
 
@@ -209,12 +249,17 @@ API error: HTTP 400 - "stream" is not supported for this model
 # 或限制日志大小（未来版本支持 log rotate）
 ```
 
-## 8. 配置文件（未来）
+## 8. 已实现的配置文件功能
 
-未来版本可能引入 `config.toml` 或 `mp_agent.toml` 配置文件，支持：
+`.mp_agent/config.toml` 当前已支持：
 
-- MCP 服务器注册
-- 默认模型和参数
+- ✅ MCP 服务器注册（`[mcp.servers]`）
+- ✅ 默认模型和参数（`[api]`）
+- ✅ 全局自动生成默认配置
+- ✅ 项目级配置覆盖全局配置
+
+未来计划增加：
+
 - 权限规则持久化
 - 主题和 UI 自定义
 - 技能目录覆盖

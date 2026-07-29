@@ -116,22 +116,28 @@ if tc.name.starts_with("mcp_") {
 
 ## 5. 配置 MCP 服务器
 
-当前 MCP 连接需要在代码中硬配置（`App::new` 中）。未来版本将通过配置文件支持动态 MCP 服务器注册。
+MCP 服务器通过 `.mp_agent/config.toml` 或全局配置的 `[mcp.servers]` 节注册，无需修改代码。
 
-示例配置（伪代码）：
+### 5.1 配置文件格式
 
 ```toml
-# 未来可能的 config.toml
-[[mcp_servers]]
-name = "filesystem"
+[mcp.servers]
+[mcp.servers.filesystem]
 command = "npx"
-args = ["@anthropic/mcp-server-filesystem", "/home/user/projects"]
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+enabled = true
 
-[[mcp_servers]]
-name = "git"
-command = "mcp-server-git"
-args = []
+[mcp.servers.git]
+command = "uvx"
+args = ["mcp-server-git"]
+enabled = true
 ```
+
+### 5.2 加载顺序
+
+1. `.mp_agent/config.toml`（项目级）
+2. `~/.config/mp_agent/config.toml`（Linux）或 `%APPDATA%/mp_agent/config.toml`（Windows）
+3. `mcp_servers.json`（旧版兼容）
 
 ## 6. 可用的 MCP 服务器
 

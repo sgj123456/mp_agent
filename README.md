@@ -21,7 +21,7 @@
 - **流式输出**：支持 SSE 流式响应，实时显示 AI 生成的 token
 - **工具调用**：内置多种原生工具，AI 可自动调用完成文件操作、命令执行、任务管理等
 - **MCP 协议支持**：可连接外部 MCP 服务器，扩展工具生态
-- **技能系统**：支持从 `.opencode/skills/` 目录加载自定义技能和 Agent 上下文
+- **技能系统**：支持从 `.mp_agent/skills/` 目录加载自定义技能和 Agent 上下文
 - **Markdown 渲染**：支持代码块、表格、引用、列表等 Markdown 格式的终端渲染，使用 `tui-markdown` 库进行语法高亮
 - **Slash 命令**：`/help`、`/clear`、`/tools` 等便捷命令 + Tab 自动补全
 - **类 Emacs 快捷键**：Ctrl+A/E/U/K/L 等，历史上下翻，滚动查看
@@ -40,7 +40,7 @@ src/
 ├── main.rs          # 入口：初始化 TUI、配置、事件循环
 ├── app.rs           # 应用状态：键盘/鼠标事件处理、界面绘制、权限审批、Agent 事件消费、上下文建议提取
 ├── agent.rs         # AI Agent：流式聊天、工具调用循环、消息管理、权限/选择请求、todo 管理
-├── config.rs        # 配置：从 .env 加载 API 密钥、模型等
+├── config.rs        # 配置：从 .mp_agent/config.toml 加载 API 密钥、模型、MCP 服务器等
 ├── mcp.rs           # MCP 管理器：连接外部 MCP 服务器、工具映射
 ├── permission.rs    # 权限管理：操作类型、规则匹配、路径处理、记忆决策
 ├── error.rs         # 错误处理：color-eyre 钩子安装
@@ -126,16 +126,30 @@ cargo build --release
 
 ### 配置
 
-编辑项目根目录的 `.env` 文件，填写你的 API 信息：
+首次运行会自动在全局目录生成默认配置文件，编辑后即可使用：
 
-```env
-OPENAI_API_KEY=sk-your-api-key
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o
-OPENAI_MAX_TOKENS=5000
+| 平台 | 全局配置路径 |
+|------|-------------|
+| Linux | `~/.config/mp_agent/config.toml` |
+| Windows | `%APPDATA%\mp_agent\config.toml` |
+
+也可以在当前项目根目录创建 `.mp_agent/config.toml`（优先级高于全局）：
+
+```toml
+[api]
+api_key = "sk-your-api-key"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+# max_tokens = 5000
+
+# [mcp.servers]
+# [mcp.servers.example]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# enabled = true
 ```
 
-> 💡 如果你使用的是兼容 OpenAI API 的服务（如 InternLM、DeepSeek 等），修改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL` 即可。
+> 💡 旧版 `.env`（`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_MAX_TOKENS`）和 `mcp_servers.json` 仍被支持作为降级方案。
 
 ### 运行
 
@@ -216,8 +230,8 @@ cargo run
 
 Agent 会自动从以下路径加载技能文件（`.md` / `.txt` / `.skill`）：
 
-- `./.opencode/skills/`
-- `$HOME/.config/opencode/skills/`
+- `./.mp_agent/skills/`
+- `$HOME/.config/mp_agent/skills/`
 
 技能文件格式：
 
@@ -272,14 +286,14 @@ cargo fmt
 - [x] Markdown 渲染（代码块 / 表格 / 引用 / 列表）
 - [x] Slash 命令 + Tab 补全
 - [x] 类 Emacs 快捷键
-- [x] 技能系统（从 `.opencode/skills/` 和 `AGENTS.md` 加载上下文）
+- [x] 技能系统（从 `.mp_agent/skills/` 和 `AGENTS.md` 加载上下文）
 - [x] MCP 客户端集成（连接外部 MCP 服务器）
 
 ### v0.2 — 体验增强
 
 - [ ] **对话历史持久化**：将聊天记录保存到本地文件，支持恢复会话
 - [ ] **多会话管理**：在同一实例中切换多个聊天对话
-- [ ] **配置 UI**：在 TUI 内直接编辑 `.env` 配置（API Key、模型等）
+- [ ] **配置 UI**：在 TUI 内直接编辑 `config.toml` 配置（API Key、模型、MCP 服务器等）
 - [ ] **主题系统**：支持亮色 / 暗色 / 自定义配色方案
 - [ ] **系统托盘 / 后台模式**：最小化到托盘，CLI 方式唤醒
 - [ ] **通知系统**：长时间任务完成时终端通知

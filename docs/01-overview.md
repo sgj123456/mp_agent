@@ -35,7 +35,7 @@ mp_agent 是一个**运行在终端内的 AI 编程助手**，核心目标是在
 | **流式输出** | 支持 SSE 流式响应，实时显示 AI 生成的 token，附带 token 用量统计 |
 | **工具调用** | 内置多种原生工具，AI 可自动调用完成文件操作、命令执行等任务 |
 | **MCP 协议支持** | 可连接外部 MCP 服务器，扩展工具生态 |
-| **技能系统** | 支持从 `.opencode/skills/` 目录加载自定义技能和 Agent 上下文 |
+| **技能系统** | 支持从 `.mp_agent/skills/` 目录加载自定义技能和 Agent 上下文 |
 | **Markdown 渲染** | 支持代码块、表格、引用、列表等 Markdown 格式的终端渲染，带语法高亮 |
 | **Slash 命令** | `/help`、`/clear`、`/tools` 等便捷命令 + Tab 自动补全 |
 | **类 Emacs 快捷键** | Ctrl+A/E/U/L 等，历史上下翻，滚动查看 |
@@ -56,7 +56,7 @@ mp_agent 是一个**运行在终端内的 AI 编程助手**，核心目标是在
 | MCP 客户端 | rmcp (Model Context Protocol) |
 | HTTP 客户端 | reqwest + eventsource-stream |
 | Markdown | pulldown-cmark (自定义渲染为 Ratatui) |
-| 配置 | dotenvy (.env 文件) |
+| 配置 | TOML (`.mp_agent/config.toml`)，降级兼容 `.env` |
 | 日志 | tracing + tracing-subscriber |
 | 错误处理 | color-eyre |
 
@@ -70,9 +70,8 @@ cd mp_agent
 # 构建
 cargo build --release
 
-# 配置 API 密钥
-cp .env.example .env   # 如存在，或直接编辑 .env
-# 编辑 .env 填写 OPENAI_API_KEY 等
+# 首次运行会自动生成全局配置 ~/.config/mp_agent/config.toml
+# 编辑该文件填写 api_key 后重新运行
 
 # 运行
 cargo run
@@ -88,14 +87,14 @@ cargo run
 mp_agent/
 ├── Cargo.toml              # 依赖与包配置
 ├── README.md               # 项目简介
-├── .env                    # 环境变量（API 密钥等，不应提交）
+├── .mp_agent/              # 项目级配置目录（config.toml + skills/）
 ├── .gitignore
 ├── docs/                   # 项目文档（本目录）
 ├── src/
 │   ├── main.rs             # 入口：初始化 TUI、配置、事件循环
 │   ├── app.rs              # 应用状态：键盘事件处理、事件消费、界面绘制、权限审批
 │   ├── agent.rs            # AI Agent：流式聊天、工具调用循环、消息管理、权限请求
-│   ├── config.rs           # 配置：从 .env 加载 API 密钥、模型等
+│   ├── config.rs           # 配置：从 .mp_agent/config.toml 加载 API 密钥、模型、MCP 服务器
 │   ├── mcp.rs              # MCP 管理器：连接外部 MCP 服务器、工具映射
 │   ├── permission.rs       # 权限管理：操作类型、规则匹配、路径处理
 │   ├── error.rs            # 错误处理：color-eyre 钩子安装

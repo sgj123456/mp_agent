@@ -34,8 +34,8 @@ mp_agent 按以下顺序加载技能文件：
 
 | 优先级 | 路径 | 说明 |
 |---|---|---|
-| 1 | `./.opencode/skills/` | 当前项目下的技能目录（项目级） |
-| 2 | `$HOME/.config/opencode/skills/` | 用户全局技能目录（全局级） |
+| 1 | `./.mp_agent/skills/` | 当前项目下的技能目录（项目级） |
+| 2 | `$HOME/.config/mp_agent/skills/` | 用户全局技能目录（全局级） |
 
 项目级技能优先于全局技能加载。如果两个位置存在同名技能，两者都会被加载，项目级技能出现在系统提示的后部（因此优先级更高）。
 
@@ -49,7 +49,7 @@ mp_agent 按以下顺序加载技能文件：
 第三行及以后：技能正文内容...
 ```
 
-示例（`.opencode/skills/rust-conventions.skill`）：
+示例（`.mp_agent/skills/rust-conventions.skill`）：
 
 ```
 Rust 编码约定
@@ -154,7 +154,7 @@ You are mp_agent, an AI-powered coding assistant...
 
 ## 7. 创建技能的步骤
 
-1. 在项目根目录创建 `.opencode/skills/` 目录（如不存在）
+1. 在项目根目录创建 `.mp_agent/skills/` 目录（如不存在）
 2. 在目录下创建技能文件（推荐使用 `.skill` 扩展名）
 3. 第一行写技能名称，第二行写描述，后续写正文
 4. 重启 mp_agent 使新技能生效
