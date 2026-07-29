@@ -244,7 +244,9 @@ fn parse_triggers_from_body(body: &str) -> Vec<String> {
 
     for line in body.lines() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("## Triggers") || trimmed.eq_ignore_ascii_case("## Triggers:") {
+        if trimmed.eq_ignore_ascii_case("## Triggers")
+            || trimmed.eq_ignore_ascii_case("## Triggers:")
+        {
             in_triggers = true;
             continue;
         }
@@ -526,7 +528,11 @@ mod tests {
     fn test_skill_parse_simple() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.skill");
-        fs::write(&path, "Test Skill\nThis is a test. It does nothing.\n\n## Triggers:\ntest\nnothing").unwrap();
+        fs::write(
+            &path,
+            "Test Skill\nThis is a test. It does nothing.\n\n## Triggers:\ntest\nnothing",
+        )
+        .unwrap();
 
         let skill = Skill::load_from_file(&path).unwrap();
         assert_eq!(skill.name, "Test Skill");
@@ -538,7 +544,11 @@ mod tests {
     fn test_skill_parse_no_triggers() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("no_trigger.skill");
-        fs::write(&path, "# No Trigger Skill\nJust a description, no triggers.").unwrap();
+        fs::write(
+            &path,
+            "# No Trigger Skill\nJust a description, no triggers.",
+        )
+        .unwrap();
 
         let skill = Skill::load_from_file(&path).unwrap();
         assert_eq!(skill.name, "No Trigger Skill");
@@ -550,7 +560,11 @@ mod tests {
     fn test_skill_parse_header_prefix() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("header.skill");
-        fs::write(&path, "## Markdown Header\nDescription here.\n\n## Triggers:\nmarkdown").unwrap();
+        fs::write(
+            &path,
+            "## Markdown Header\nDescription here.\n\n## Triggers:\nmarkdown",
+        )
+        .unwrap();
 
         let skill = Skill::load_from_file(&path).unwrap();
         assert_eq!(skill.name, "Markdown Header");
@@ -623,14 +637,20 @@ mod tests {
     fn test_parse_yaml_kv_simple() {
         let map = parse_yaml_kv("name: test\ndescription: hello world");
         assert_eq!(map.get("name").map(|s| s.as_str()), Some("test"));
-        assert_eq!(map.get("description").map(|s| s.as_str()), Some("hello world"));
+        assert_eq!(
+            map.get("description").map(|s| s.as_str()),
+            Some("hello world")
+        );
     }
 
     #[test]
     fn test_parse_yaml_kv_folded() {
         let map = parse_yaml_kv("name: test\ndescription: >\n  multi\n  line\nkey2: val2");
         assert_eq!(map.get("name").map(|s| s.as_str()), Some("test"));
-        assert_eq!(map.get("description").map(|s| s.as_str()), Some("multi line"));
+        assert_eq!(
+            map.get("description").map(|s| s.as_str()),
+            Some("multi line")
+        );
         assert_eq!(map.get("key2").map(|s| s.as_str()), Some("val2"));
     }
 

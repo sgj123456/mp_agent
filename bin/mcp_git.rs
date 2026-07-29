@@ -1,7 +1,5 @@
-use rmcp::model::ErrorData;
-use rmcp::model::{
-    CallToolResult, ClientRequest, Content, ErrorCode, ListToolsResult, ServerResult, Tool,
-};
+use rmcp::model::{CallToolResult, ClientRequest, ListToolsResult, ServerResult, Tool};
+use rmcp::model::{ContentBlock, ErrorCode, ErrorData};
 use rmcp::service::{RoleServer, Service, ServiceExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -38,9 +36,7 @@ pub struct GitMcpServer;
 
 impl GitMcpServer {
     fn run_git(&self, args: &[&str]) -> CallToolResult {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .output();
+        let output = std::process::Command::new("git").args(args).output();
         match output {
             Ok(out) => {
                 let mut text = String::new();
@@ -51,11 +47,16 @@ impl GitMcpServer {
                     text.push_str(&String::from_utf8_lossy(&out.stderr));
                 }
                 if !out.status.success() {
-                    text = format!("git {} failed (exit {}):\n{}", args.join(" "), out.status.code().unwrap_or(-1), text);
+                    text = format!(
+                        "git {} failed (exit {}):\n{}",
+                        args.join(" "),
+                        out.status.code().unwrap_or(-1),
+                        text
+                    );
                 }
-                CallToolResult::success(vec![Content::text(text)])
+                CallToolResult::success(vec![ContentBlock::text(text)])
             }
-            Err(e) => CallToolResult::error(vec![Content::text(format!("git error: {}", e))]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("git error: {}", e))]),
         }
     }
 
@@ -92,14 +93,18 @@ impl GitMcpServer {
                 if let Some(name) = &req.name {
                     self.run_git(&["branch", name])
                 } else {
-                    CallToolResult::error(vec![Content::text("branch name required for create action")])
+                    CallToolResult::error(vec![ContentBlock::text(
+                        "branch name required for create action",
+                    )])
                 }
             }
             Some("delete") | Some("del") => {
                 if let Some(name) = &req.name {
                     self.run_git(&["branch", "-d", name])
                 } else {
-                    CallToolResult::error(vec![Content::text("branch name required for delete action")])
+                    CallToolResult::error(vec![ContentBlock::text(
+                        "branch name required for delete action",
+                    )])
                 }
             }
             _ => self.run_git(&["branch"]),
@@ -124,59 +129,46 @@ impl GitMcpServer {
                 } else {
                     "Commit created.".to_string()
                 };
-                CallToolResult::success(vec![Content::text(text)])
+                CallToolResult::success(vec![ContentBlock::text(text)])
             }
-            Err(e) => CallToolResult::error(vec![Content::text(format!("git commit error: {}", e))]),
+            Err(e) => {
+                CallToolResult::error(vec![ContentBlock::text(format!("git commit error: {}", e))])
+            }
         }
     }
 
     fn list_tools(&self) -> Vec<Tool> {
         vec![
-            Tool {
-                name: "git_status".into(),
-                title: Some("Git Status".into()),
-                description: Some("Show working tree status (short format with branch info)".into()),
-                input_schema: Arc::new(schema_for_type::<StatusRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
-            Tool {
-                name: "git_diff".into(),
-                title: Some("Git Diff".into()),
-                description: Some("Show staged or unstaged diff. Use staged=true to show staged changes.".into()),
-                input_schema: Arc::new(schema_for_type::<DiffRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
-            Tool {
-                name: "git_log".into(),
-                title: Some("Git Log".into()),
-                description: Some("Show commit log with oneline format, graph, and decorations. Default 10 entries, max 100.".into()),
-                input_schema: Arc::new(schema_for_type::<LogRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
-            Tool {
-                name: "git_branch".into(),
-                title: Some("Git Branch".into()),
-                description: Some("List, create, or delete branches. action: 'list' (default) | 'create' | 'delete'".into()),
-                input_schema: Arc::new(schema_for_type::<BranchRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
-            Tool {
-                name: "git_commit".into(),
-                title: Some("Git Commit".into()),
-                description: Some("Create a commit with the given message and optional body.".into()),
-                input_schema: Arc::new(schema_for_type::<CommitRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
+            Tool::new(
+                "git_status",
+                "Show working tree status (short format with branch info)",
+                Arc::new(schema_for_type::<StatusRequest>()),
+            )
+            .with_title("Git Status"),
+            Tool::new(
+                "git_diff",
+                "Show staged or unstaged diff. Use staged=true to show staged changes.",
+                Arc::new(schema_for_type::<DiffRequest>()),
+            )
+            .with_title("Git Diff"),
+            Tool::new(
+                "git_log",
+                "Show commit log with oneline format, graph, and decorations. Default 10 entries, max 100.",
+                Arc::new(schema_for_type::<LogRequest>()),
+            )
+            .with_title("Git Log"),
+            Tool::new(
+                "git_branch",
+                "List, create, or delete branches. action: 'list' (default) | 'create' | 'delete'",
+                Arc::new(schema_for_type::<BranchRequest>()),
+            )
+            .with_title("Git Branch"),
+            Tool::new(
+                "git_commit",
+                "Create a commit with the given message and optional body.",
+                Arc::new(schema_for_type::<CommitRequest>()),
+            )
+            .with_title("Git Commit"),
         ]
     }
 }
@@ -267,13 +259,7 @@ impl Service<RoleServer> for GitMcpServer {
         async move {
             match request {
                 ClientRequest::InitializeRequest(_req) => {
-                    let info = self_clone.get_info();
-                    Ok(ServerResult::InitializeResult(rmcp::model::InitializeResult {
-                        protocol_version: info.protocol_version,
-                        capabilities: info.capabilities,
-                        server_info: info.server_info,
-                        instructions: info.instructions,
-                    }))
+                    Ok(ServerResult::InitializeResult(self_clone.get_info()))
                 }
                 ClientRequest::ListToolsRequest(_) => Ok(ServerResult::ListToolsResult(
                     ListToolsResult::with_all_items(self_clone.list_tools()),
@@ -293,7 +279,13 @@ impl Service<RoleServer> for GitMcpServer {
                                 .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
-                                None => return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid diff params", None)),
+                                None => {
+                                    return Err(ErrorData::new(
+                                        ErrorCode::INVALID_PARAMS,
+                                        "invalid diff params",
+                                        None,
+                                    ));
+                                }
                             };
                             self_clone.diff(params)
                         }
@@ -302,7 +294,13 @@ impl Service<RoleServer> for GitMcpServer {
                                 .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
-                                None => return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid log params", None)),
+                                None => {
+                                    return Err(ErrorData::new(
+                                        ErrorCode::INVALID_PARAMS,
+                                        "invalid log params",
+                                        None,
+                                    ));
+                                }
                             };
                             self_clone.log(params)
                         }
@@ -311,7 +309,13 @@ impl Service<RoleServer> for GitMcpServer {
                                 .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
-                                None => return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid branch params", None)),
+                                None => {
+                                    return Err(ErrorData::new(
+                                        ErrorCode::INVALID_PARAMS,
+                                        "invalid branch params",
+                                        None,
+                                    ));
+                                }
                             };
                             self_clone.branch(params)
                         }
@@ -320,15 +324,23 @@ impl Service<RoleServer> for GitMcpServer {
                                 .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
-                                None => return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid commit params", None)),
+                                None => {
+                                    return Err(ErrorData::new(
+                                        ErrorCode::INVALID_PARAMS,
+                                        "invalid commit params",
+                                        None,
+                                    ));
+                                }
                             };
                             self_clone.commit(params)
                         }
-                        unknown => return Err(ErrorData::new(
-                            ErrorCode::METHOD_NOT_FOUND,
-                            format!("unknown tool: {}", unknown),
-                            None,
-                        )),
+                        unknown => {
+                            return Err(ErrorData::new(
+                                ErrorCode::METHOD_NOT_FOUND,
+                                format!("unknown tool: {}", unknown),
+                                None,
+                            ));
+                        }
                     };
                     Ok(ServerResult::CallToolResult(result))
                 }
@@ -346,12 +358,8 @@ impl Service<RoleServer> for GitMcpServer {
     }
 
     fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo {
-            protocol_version: rmcp::model::ProtocolVersion::default(),
-            capabilities: rmcp::model::ServerCapabilities::default(),
-            server_info: rmcp::model::Implementation::from_build_env(),
-            instructions: None,
-        }
+        rmcp::model::InitializeResult::new(rmcp::model::ServerCapabilities::default())
+            .with_server_info(rmcp::model::Implementation::from_build_env())
     }
 }
 

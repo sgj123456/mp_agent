@@ -1,7 +1,5 @@
-use rmcp::model::ErrorData;
-use rmcp::model::{
-    CallToolResult, ClientRequest, Content, ErrorCode, ListToolsResult, ServerResult, Tool,
-};
+use rmcp::model::{CallToolResult, ClientRequest, ListToolsResult, ServerResult, Tool};
+use rmcp::model::{ContentBlock, ErrorCode, ErrorData};
 use rmcp::service::{RoleServer, Service, ServiceExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -38,42 +36,45 @@ impl DevMcpServer {
         let entries = walk_dir(root).unwrap_or_default();
         let mut stats: Vec<(String, usize, usize)> = Vec::new();
         for path in &entries {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    let lang = match ext {
-                        "rs" => "Rust",
-                        "ts" | "tsx" => "TypeScript",
-                        "js" | "jsx" => "JavaScript",
-                        "py" => "Python",
-                        "go" => "Go",
-                        "java" => "Java",
-                        "c" | "h" => "C",
-                        "cpp" | "hpp" | "cc" => "C++",
-                        "toml" => "TOML",
-                        "json" => "JSON",
-                        "yaml" | "yml" => "YAML",
-                        "md" => "Markdown",
-                        "css" | "scss" => "CSS",
-                        "html" => "HTML",
-                        "sh" | "bash" => "Shell",
-                        _ => continue,
-                    };
-                    let lines = count_lines(path);
-                    if let Ok((line_count, byte_count)) = lines {
-                        if let Some(entry) = stats.iter_mut().find(|(l, _, _)| l == lang) {
-                            entry.1 += line_count;
-                            entry.2 += byte_count;
-                        } else {
-                            stats.push((lang.to_string(), line_count, byte_count));
-                        }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let lang = match ext {
+                    "rs" => "Rust",
+                    "ts" | "tsx" => "TypeScript",
+                    "js" | "jsx" => "JavaScript",
+                    "py" => "Python",
+                    "go" => "Go",
+                    "java" => "Java",
+                    "c" | "h" => "C",
+                    "cpp" | "hpp" | "cc" => "C++",
+                    "toml" => "TOML",
+                    "json" => "JSON",
+                    "yaml" | "yml" => "YAML",
+                    "md" => "Markdown",
+                    "css" | "scss" => "CSS",
+                    "html" => "HTML",
+                    "sh" | "bash" => "Shell",
+                    _ => continue,
+                };
+                let lines = count_lines(path);
+                if let Ok((line_count, byte_count)) = lines {
+                    if let Some(entry) = stats.iter_mut().find(|(l, _, _)| l == lang) {
+                        entry.1 += line_count;
+                        entry.2 += byte_count;
+                    } else {
+                        stats.push((lang.to_string(), line_count, byte_count));
                     }
                 }
+            }
         }
 
-        stats.sort_by(|a, b| b.1.cmp(&a.1));
+        stats.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let mut output = String::new();
         output.push_str(&format!("Project Stats for: {}\n\n", root));
-        output.push_str(&format!("{:<15} {:>12} {:>12}\n", "Language", "Lines", "Bytes"));
+        output.push_str(&format!(
+            "{:<15} {:>12} {:>12}\n",
+            "Language", "Lines", "Bytes"
+        ));
         output.push_str(&format!("{:-<15} {:-<12} {:-<12}\n", "", "", ""));
         let (mut total_lines, mut total_bytes) = (0, 0);
         for (lang, lines, bytes) in &stats {
@@ -82,8 +83,11 @@ impl DevMcpServer {
             total_bytes += bytes;
         }
         output.push_str(&format!("{:-<15} {:-<12} {:-<12}\n", "", "", ""));
-        output.push_str(&format!("{:<15} {:>12} {:>12}\n", "TOTAL", total_lines, total_bytes));
-        CallToolResult::success(vec![Content::text(output)])
+        output.push_str(&format!(
+            "{:<15} {:>12} {:>12}\n",
+            "TOTAL", total_lines, total_bytes
+        ));
+        CallToolResult::success(vec![ContentBlock::text(output)])
     }
 
     fn find_large_files(&self, req: LargeFilesRequest) -> CallToolResult {
@@ -94,14 +98,15 @@ impl DevMcpServer {
 
         let entries = walk_dir(root).unwrap_or_default();
         for path in &entries {
-            if let Ok(meta) = std::fs::metadata(path) {
-                if meta.is_file() && meta.len() >= min_bytes {
-                    large_files.push((path.to_string_lossy().to_string(), meta.len()));
-                }
+            if let Ok(meta) = std::fs::metadata(path)
+                && meta.is_file()
+                && meta.len() >= min_bytes
+            {
+                large_files.push((path.to_string_lossy().to_string(), meta.len()));
             }
         }
 
-        large_files.sort_by(|a, b| b.1.cmp(&a.1));
+        large_files.sort_by_key(|b| std::cmp::Reverse(b.1));
         large_files.truncate(max_results);
 
         let mut output = String::new();
@@ -121,7 +126,7 @@ impl DevMcpServer {
             }
         }
 
-        CallToolResult::success(vec![Content::text(output)])
+        CallToolResult::success(vec![ContentBlock::text(output)])
     }
 
     fn port_check(&self, req: PortCheckRequest) -> CallToolResult {
@@ -136,7 +141,7 @@ impl DevMcpServer {
         } else {
             format!("Port {} is AVAILABLE", req.port)
         };
-        CallToolResult::success(vec![Content::text(output)])
+        CallToolResult::success(vec![ContentBlock::text(output)])
     }
 
     fn disk_usage(&self, req: DiskUsageRequest) -> CallToolResult {
@@ -147,57 +152,55 @@ impl DevMcpServer {
         match output {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout).to_string();
-                CallToolResult::success(vec![Content::text(text)])
+                CallToolResult::success(vec![ContentBlock::text(text)])
             }
-            Err(e) => CallToolResult::error(vec![Content::text(format!("du error: {}", e))]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("du error: {}", e))]),
         }
     }
 
     fn list_tools(&self) -> Vec<Tool> {
         vec![
-            Tool {
-                name: "project_stats".into(),
-                title: Some("Project Stats".into()),
-                description: Some("Count lines of code and bytes by language in a directory tree. Ignores hidden dirs and common build artifacts.".into()),
-                input_schema: Arc::new(schema_for_type::<ProjectStatsRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
-            Tool {
-                name: "find_large_files".into(),
-                title: Some("Find Large Files".into()),
-                description: Some("Find files larger than a threshold (default 1 MB) in a directory tree.".into()),
-                input_schema: Arc::new(schema_for_type::<LargeFilesRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
-            Tool {
-                name: "port_check".into(),
-                title: Some("Port Check".into()),
-                description: Some("Check if a TCP port is in use on localhost.".into()),
-                input_schema: Arc::new(schema_for_type::<PortCheckRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
-            Tool {
-                name: "disk_usage".into(),
-                title: Some("Disk Usage".into()),
-                description: Some("Show disk usage summary for a path (runs `du -sh`).".into()),
-                input_schema: Arc::new(schema_for_type::<DiskUsageRequest>()),
-                output_schema: None,
-                annotations: None,
-                icons: None,
-            },
+            Tool::new(
+                "project_stats",
+                "Count lines of code and bytes by language in a directory tree. Ignores hidden dirs and common build artifacts.",
+                Arc::new(schema_for_type::<ProjectStatsRequest>()),
+            )
+            .with_title("Project Stats"),
+            Tool::new(
+                "find_large_files",
+                "Find files larger than a threshold (default 1 MB) in a directory tree.",
+                Arc::new(schema_for_type::<LargeFilesRequest>()),
+            )
+            .with_title("Find Large Files"),
+            Tool::new(
+                "port_check",
+                "Check if a TCP port is in use on localhost.",
+                Arc::new(schema_for_type::<PortCheckRequest>()),
+            )
+            .with_title("Port Check"),
+            Tool::new(
+                "disk_usage",
+                "Show disk usage summary for a path (runs `du -sh`).",
+                Arc::new(schema_for_type::<DiskUsageRequest>()),
+            )
+            .with_title("Disk Usage"),
         ]
     }
 }
 
 fn walk_dir(path: &str) -> std::io::Result<Vec<std::path::PathBuf>> {
     let mut files = Vec::new();
-    let ignore_dirs = [".git", "node_modules", "target", ".hg", ".svn", "__pycache__", ".venv", "dist", "build"];
+    let ignore_dirs = [
+        ".git",
+        "node_modules",
+        "target",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".venv",
+        "dist",
+        "build",
+    ];
     let mut stack = vec![std::path::PathBuf::from(path)];
     while let Some(dir) = stack.pop() {
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -295,13 +298,7 @@ impl Service<RoleServer> for DevMcpServer {
         async move {
             match request {
                 ClientRequest::InitializeRequest(_req) => {
-                    let info = self_clone.get_info();
-                    Ok(ServerResult::InitializeResult(rmcp::model::InitializeResult {
-                        protocol_version: info.protocol_version,
-                        capabilities: info.capabilities,
-                        server_info: info.server_info,
-                        instructions: info.instructions,
-                    }))
+                    Ok(ServerResult::InitializeResult(self_clone.get_info()))
                 }
                 ClientRequest::ListToolsRequest(_) => Ok(ServerResult::ListToolsResult(
                     ListToolsResult::with_all_items(self_clone.list_tools()),
@@ -321,7 +318,13 @@ impl Service<RoleServer> for DevMcpServer {
                                 .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
-                                None => return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid find_large_files params", None)),
+                                None => {
+                                    return Err(ErrorData::new(
+                                        ErrorCode::INVALID_PARAMS,
+                                        "invalid find_large_files params",
+                                        None,
+                                    ));
+                                }
                             };
                             self_clone.find_large_files(params)
                         }
@@ -330,7 +333,13 @@ impl Service<RoleServer> for DevMcpServer {
                                 .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
-                                None => return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid port_check params", None)),
+                                None => {
+                                    return Err(ErrorData::new(
+                                        ErrorCode::INVALID_PARAMS,
+                                        "invalid port_check params",
+                                        None,
+                                    ));
+                                }
                             };
                             self_clone.port_check(params)
                         }
@@ -339,15 +348,23 @@ impl Service<RoleServer> for DevMcpServer {
                                 .and_then(|v| serde_json::from_value(Value::Object(v.clone())).ok())
                             {
                                 Some(p) => p,
-                                None => return Err(ErrorData::new(ErrorCode::INVALID_PARAMS, "invalid disk_usage params", None)),
+                                None => {
+                                    return Err(ErrorData::new(
+                                        ErrorCode::INVALID_PARAMS,
+                                        "invalid disk_usage params",
+                                        None,
+                                    ));
+                                }
                             };
                             self_clone.disk_usage(params)
                         }
-                        unknown => return Err(ErrorData::new(
-                            ErrorCode::METHOD_NOT_FOUND,
-                            format!("unknown tool: {}", unknown),
-                            None,
-                        )),
+                        unknown => {
+                            return Err(ErrorData::new(
+                                ErrorCode::METHOD_NOT_FOUND,
+                                format!("unknown tool: {}", unknown),
+                                None,
+                            ));
+                        }
                     };
                     Ok(ServerResult::CallToolResult(result))
                 }
@@ -365,12 +382,8 @@ impl Service<RoleServer> for DevMcpServer {
     }
 
     fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::model::ServerInfo {
-            protocol_version: rmcp::model::ProtocolVersion::default(),
-            capabilities: rmcp::model::ServerCapabilities::default(),
-            server_info: rmcp::model::Implementation::from_build_env(),
-            instructions: None,
-        }
+        rmcp::model::InitializeResult::new(rmcp::model::ServerCapabilities::default())
+            .with_server_info(rmcp::model::Implementation::from_build_env())
     }
 }
 
@@ -414,7 +427,13 @@ mod tests {
     fn test_port_check_available() {
         let srv = DevMcpServer;
         let result = srv.port_check(PortCheckRequest { port: 65530 });
-        assert!(result.content[0].as_text().unwrap().text.contains("AVAILABLE"));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("AVAILABLE")
+        );
     }
 
     #[test]

@@ -563,13 +563,28 @@ impl App {
                 self.input.clear();
             }
             cmd if cmd.starts_with("/skill:") => {
-                let name = input.trim().to_lowercase().strip_prefix("/skill:").unwrap_or("").trim().to_string();
+                let name = input
+                    .trim()
+                    .to_lowercase()
+                    .strip_prefix("/skill:")
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if name.is_empty() {
-                    self.chat.add_message(ChatMessage::Error("Usage: `/skill:<name>` — load a skill by name".to_string()));
+                    self.chat.add_message(ChatMessage::Error(
+                        "Usage: `/skill:<name>` — load a skill by name".to_string(),
+                    ));
                 } else {
-                    let matched: Vec<&Skill> = self.skills.iter().filter(|s| s.name.eq_ignore_ascii_case(&name)).collect();
+                    let matched: Vec<&Skill> = self
+                        .skills
+                        .iter()
+                        .filter(|s| s.name.eq_ignore_ascii_case(&name))
+                        .collect();
                     if matched.is_empty() {
-                        self.chat.add_message(ChatMessage::Error(format!("Skill '{}' not found. Use `/skills` to list available skills.", name)));
+                        self.chat.add_message(ChatMessage::Error(format!(
+                            "Skill '{}' not found. Use `/skills` to list available skills.",
+                            name
+                        )));
                     } else {
                         let s = matched[0];
                         match std::fs::read_to_string(&s.path) {
@@ -578,7 +593,11 @@ impl App {
                                 self.chat.add_message(ChatMessage::System(msg));
                             }
                             Err(e) => {
-                                self.chat.add_message(ChatMessage::Error(format!("Failed to read skill file `{}`: {}", s.path.display(), e)));
+                                self.chat.add_message(ChatMessage::Error(format!(
+                                    "Failed to read skill file `{}`: {}",
+                                    s.path.display(),
+                                    e
+                                )));
                             }
                         }
                     }
@@ -587,7 +606,8 @@ impl App {
             }
             "/skills" => {
                 if self.skills.is_empty() {
-                    self.chat.add_message(ChatMessage::System("No skills loaded.".to_string()));
+                    self.chat
+                        .add_message(ChatMessage::System("No skills loaded.".to_string()));
                     self.input.clear();
                     return;
                 }
@@ -596,7 +616,10 @@ impl App {
 
                 // Level 1: no args — list names only
                 if query.is_empty() {
-                    let mut msg = format!("**Skills ({}):**  _Type `/skills -l` for details or `/skill:<name>` to inspect._\n\n", self.skills.len());
+                    let mut msg = format!(
+                        "**Skills ({}):**  _Type `/skills -l` for details or `/skill:<name>` to inspect._\n\n",
+                        self.skills.len()
+                    );
                     for s in &self.skills {
                         msg.push_str(&format!("- `{}`\n", s.name));
                     }
@@ -616,40 +639,62 @@ impl App {
                         msg.push_str(&format!("Path: `{}`\n\n", s.path.display()));
                     }
                     self.chat.add_message(ChatMessage::System(msg));
-                }
-                else {
+                } else {
                     // Parse optional --read flag at end of query
-                    let (name, read_mode) = if let Some(rest) = query.strip_suffix(" --read").or_else(|| query.strip_suffix(" -r")) {
+                    let (name, read_mode) = if let Some(rest) = query
+                        .strip_suffix(" --read")
+                        .or_else(|| query.strip_suffix(" -r"))
+                    {
                         (rest.trim().to_string(), true)
                     } else {
                         (query.to_string(), false)
                     };
 
-                    let matched: Vec<&Skill> = self.skills.iter().filter(|s| s.name.eq_ignore_ascii_case(&name)).collect();
+                    let matched: Vec<&Skill> = self
+                        .skills
+                        .iter()
+                        .filter(|s| s.name.eq_ignore_ascii_case(&name))
+                        .collect();
 
                     if matched.is_empty() {
-                        self.chat.add_message(ChatMessage::Error(format!("Skill '{}' not found. Use `/skills` to list available skills.", name)));
+                        self.chat.add_message(ChatMessage::Error(format!(
+                            "Skill '{}' not found. Use `/skills` to list available skills.",
+                            name
+                        )));
                     } else {
                         let s = matched[0];
                         if read_mode {
                             // Read and show full file content
                             match std::fs::read_to_string(&s.path) {
                                 Ok(content) => {
-                                    let msg = format!("### {} — Full content\n\n```\n{}\n```", s.name, content);
+                                    let msg = format!(
+                                        "### {} — Full content\n\n```\n{}\n```",
+                                        s.name, content
+                                    );
                                     self.chat.add_message(ChatMessage::System(msg));
                                 }
                                 Err(e) => {
-                                    self.chat.add_message(ChatMessage::Error(format!("Failed to read `{}`: {}", s.path.display(), e)));
+                                    self.chat.add_message(ChatMessage::Error(format!(
+                                        "Failed to read `{}`: {}",
+                                        s.path.display(),
+                                        e
+                                    )));
                                 }
                             }
                         } else {
                             // Show metadata for this skill
                             let mut msg = format!("### {}\n\n{}\n\n", s.name, s.description);
                             if !s.triggers.is_empty() {
-                                msg.push_str(&format!("**Triggers:** {}\n\n", s.triggers.join(", ")));
+                                msg.push_str(&format!(
+                                    "**Triggers:** {}\n\n",
+                                    s.triggers.join(", ")
+                                ));
                             }
                             msg.push_str(&format!("**Path:** `{}`\n\n", s.path.display()));
-                            msg.push_str(&format!("_Use `/skill:{}` or `/skills {} --read` to read the full file._", s.name, s.name));
+                            msg.push_str(&format!(
+                                "_Use `/skill:{}` or `/skills {} --read` to read the full file._",
+                                s.name, s.name
+                            ));
                             self.chat.add_message(ChatMessage::System(msg));
                         }
                     }

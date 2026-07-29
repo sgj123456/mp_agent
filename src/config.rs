@@ -54,12 +54,15 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o"
 # max_tokens = 4096
 
-# Uncomment and configure MCP servers below:
-# [mcp.servers]
-# [mcp.servers.example]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-# enabled = true
+# MCP servers installed alongside mp_agent (via `cargo install`):
+[mcp.servers]
+[mcp.servers.mcp-git]
+command = "mcp-git"
+enabled = true
+
+[mcp.servers.mcp-dev]
+command = "mcp-dev"
+enabled = true
 "#;
     std::fs::write(path, template)
         .map_err(|e| color_eyre::eyre::eyre!("Failed to create {}: {}", path.display(), e))?;

@@ -457,15 +457,7 @@ mod tests {
     async fn test_mcp_get_openai_tools() {
         use rmcp::model::Tool;
         use std::sync::Arc;
-        let tool = Tool {
-            name: "test".into(),
-            title: None,
-            description: Some("test tool".into()),
-            input_schema: Arc::new(serde_json::Map::new()),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-        };
+        let tool = Tool::new("test", "test tool", Arc::new(serde_json::Map::new()));
         let child = Arc::new(Mutex::new(
             tokio::process::Command::new("echo").spawn().unwrap(),
         ));
