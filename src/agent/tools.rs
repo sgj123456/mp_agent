@@ -65,13 +65,13 @@ fn read_file_tool() -> Value {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file.",
+            "description": "Read the contents of a file. The output always starts with a header like 'File: ... (N lines, showing ...)', so you always know the total line count. If offset is beyond the file, the last `limit` lines are returned instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path" },
-                    "offset": { "type": "integer", "description": "Start line (0-indexed, optional)" },
-                    "limit": { "type": "integer", "description": "Max lines (optional)" }
+                    "offset": { "type": "integer", "description": "Start line (0-indexed, optional, default 0). If >= total lines, shows the last `limit` lines." },
+                    "limit": { "type": "integer", "description": "Max lines to read (optional, default 2000)" }
                 },
                 "required": ["path"]
             }
@@ -323,28 +323,43 @@ async fn execute_read_file(args: &Value) -> String {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => {
             let lines: Vec<&str> = content.lines().collect();
-            let end = std::cmp::min(offset + limit, lines.len());
-            if offset >= lines.len() {
-                "(offset beyond file length)".to_string()
-            } else {
-                let total = lines.len();
-                let shown = end - offset;
-                let mut result = format!(
-                    "File: {} ({} lines, showing {}-{})\n",
-                    path,
-                    total,
-                    offset + 1,
-                    end
-                );
-                result.push_str(&lines[offset..end].join("\n"));
-                if shown < total {
-                    result.push_str(&format!(
-                        "\n(... truncated, showing {} of {} lines)",
-                        shown, total
-                    ));
-                }
-                result
+            let total = lines.len();
+
+            if total == 0 {
+                return format!("File: {} (empty)\n", path);
             }
+
+            // Clamp offset — if beyond file, show last `limit` lines
+            let start = if offset >= total {
+                total.saturating_sub(limit)
+            } else {
+                offset
+            };
+
+            let end = std::cmp::min(start + limit, total);
+            let shown = end - start;
+
+            let mut result = format!(
+                "File: {} ({} lines, showing {}-{})\n",
+                path,
+                total,
+                start + 1,
+                end
+            );
+            result.push_str(&lines[start..end].join("\n"));
+            if shown < total {
+                result.push_str(&format!(
+                    "\n(... truncated, showing {} of {} lines)",
+                    shown, total
+                ));
+            }
+            if offset >= total {
+                result.push_str(&format!(
+                    "\n(note: requested offset {} was >= total lines, showing last {} lines)",
+                    offset, shown
+                ));
+            }
+            result
         }
         Err(e) => format!("Error reading file: {}", e),
     }
@@ -664,7 +679,10 @@ mod tests {
 
         let args = json!({"path": path.to_string_lossy(), "offset": 100});
         let result = execute_read_file(&args).await;
-        assert!(result.contains("offset beyond"));
+        assert!(result.contains("1 lines"), "should show total line count");
+        assert!(result.contains("showing 1-1"), "should clamp to last line");
+        assert!(result.contains("hello"), "should show file content");
+        assert!(result.contains("note:"), "should explain the clamp");
     }
 
     #[tokio::test]
