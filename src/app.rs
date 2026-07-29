@@ -6,6 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use tokio::sync::{mpsc, oneshot};
+use unicode_width::UnicodeWidthChar;
 
 use crate::agent::skill;
 use crate::agent::{Agent, AgentEvent, ChoiceResult};
@@ -18,11 +19,15 @@ use crate::ui::layout::{compute_choice_panel, compute_layout, compute_suggestion
 use crate::ui::{BG, CYAN, SURFACE, TEXT, TEXT_DIM, YELLOW};
 
 /// Represents a selected text range within the chat area.
-/// `start_line` and `end_line` are absolute line indices (including all messages).
+/// `start_line`/`end_line` are absolute line indices (including all messages).
+/// `start_col`/`end_col` are 0-based visual column positions within the rendered
+/// text (block border excluded). Use `u16::MAX` to select the entire line.
 #[derive(Debug, Clone, Copy)]
 pub struct SelectionRange {
     pub start_line: usize,
     pub end_line: usize,
+    pub start_col: u16,
+    pub end_col: u16,
 }
 
 pub enum AgentCommand {
@@ -56,7 +61,9 @@ pub struct App {
     cmd_tx: mpsc::UnboundedSender<AgentCommand>,
     event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     frame_count: u64,
-    last_model: String,
+    /// Shared config — App keeps a clone so the status bar and model-context
+    /// logic read the exact same model/base_url as the Agent's API calls.
+    config: Config,
     pending_permission: Option<PendingPermission>,
     pending_choice: Vec<PendingChoice>,
     permission_rules: Vec<PermissionRule>,
@@ -85,6 +92,9 @@ pub struct App {
     /// Most recent input area rectangle, updated on every draw.
     /// Used to detect mouse clicks inside the input area for cursor positioning.
     input_area: Rect,
+    /// Most recent chat area rectangle, used to translate mouse coordinates
+    /// into column offsets for flexible text selection.
+    chat_area: Rect,
 }
 
 impl App {
@@ -96,8 +106,7 @@ impl App {
         let agents_md = skill::load_agents_md();
         let system_prompt = skill::build_system_prompt(&skills, agents_md.as_deref());
 
-        let last_model = config.model.clone();
-        let context_limit = model_context_limit(&last_model);
+        let context_limit = model_context_limit(&config.model);
 
         // Initialize MCP manager from unified config file (TOML or JSON fallback)
         let mcp_manager = McpManager::from_project();
@@ -105,7 +114,7 @@ impl App {
         // Determine if there are any configured MCP servers
         let has_mcp_servers = mcp_manager.config_has_servers();
 
-        let agent = Agent::new(config, system_prompt, event_tx, mcp_manager);
+        let agent = Agent::new(config.clone(), system_prompt, event_tx, mcp_manager);
         tokio::spawn(run_agent_task(agent, cmd_rx));
 
         // Queue background MCP connection if servers are configured
@@ -129,7 +138,7 @@ impl App {
             cmd_tx,
             event_rx,
             frame_count: 0,
-            last_model,
+            config,
             pending_permission: None,
             pending_choice: Vec::new(),
             permission_rules: Vec::new(),
@@ -144,6 +153,7 @@ impl App {
             chat_plain_lines: Vec::new(),
             clipboard: arboard::Clipboard::new().ok(),
             input_area: Rect::default(),
+            chat_area: Rect::default(),
         }
     }
 
@@ -326,31 +336,37 @@ impl App {
                     self.input.set_cursor_by_click(row, col, content_width);
                     return;
                 }
-                // Otherwise handle as chat click
+                // Otherwise handle as chat click — select at column granularity
                 self.left_button_down = true;
-                let row = mouse.row as usize;
                 let scroll = self.chat.scroll_offset() as usize;
-                let click_line = scroll + row;
+                let ca = self.chat_area;
+                let click_line = scroll + mouse.row.saturating_sub(ca.y) as usize;
+                // Column relative to block inner area (1 col for block border)
+                let click_col = mouse.column.saturating_sub(ca.x + 1);
                 self.chat.toggle_fold_at_line(click_line);
                 self.selection = Some(SelectionRange {
                     start_line: click_line,
                     end_line: click_line,
+                    start_col: click_col,
+                    end_col: click_col,
                 });
             }
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 if self.left_button_down {
-                    let row = mouse.row as usize;
+                    let ca = self.chat_area;
                     let scroll = self.chat.scroll_offset() as usize;
-                    let click_line = scroll + row;
+                    let click_line = scroll + mouse.row.saturating_sub(ca.y) as usize;
+                    let click_col = mouse.column.saturating_sub(ca.x + 1);
                     if let Some(ref mut sel) = self.selection {
                         sel.end_line = click_line;
+                        sel.end_col = click_col;
                     }
                 }
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.left_button_down = false;
                 if let Some(sel) = self.selection {
-                    let text = extract_selection_text(self, sel);
+                    let text = extract_selection_text(&self.chat_plain_lines, sel);
                     if !text.is_empty() {
                         if let Some(ref mut cb) = self.clipboard {
                             if let Err(e) = cb.set_text(text) {
@@ -514,11 +530,11 @@ impl App {
             }
             "/model" => {
                 let msg = if args.is_empty() {
-                    format!("Current model: `{}`", self.last_model)
+                    format!("Current model: `{}`", self.config.model)
                 } else {
                     format!(
                         "Model change not supported at runtime. Current model: `{}`",
-                        self.last_model
+                        self.config.model
                     )
                 };
                 self.chat.add_message(ChatMessage::System(msg));
@@ -655,6 +671,9 @@ impl App {
                         server_name, error
                     )));
                 }
+                AgentEvent::NextInputPrediction(prediction) => {
+                    self.input.set_prediction(prediction);
+                }
                 AgentEvent::McpConnectionsDone => {
                     if self.status_message.contains("MCP") {
                         self.status_message = "Ready".to_string();
@@ -715,6 +734,7 @@ impl App {
             let input_area = layout.input;
             let status_area = layout.status;
             self.input_area = input_area;
+            self.chat_area = chat_area;
 
             if !self.streaming_buffer.is_empty() {
                 self.chat
@@ -728,27 +748,53 @@ impl App {
             self.chat_plain_lines = self.chat.plain_text_lines();
 
             if let Some(sel) = self.selection {
-                let start = sel.start_line.min(sel.end_line);
-                let end = sel.start_line.max(sel.end_line);
-                let scroll = self.chat.scroll_offset() as usize;
-                let visible_start = start.saturating_sub(scroll);
-                let visible_end = end.saturating_sub(scroll);
-                if visible_start < chat_area.height as usize && chat_area.height > 0 {
-                    let row_start = (chat_area.y + visible_start as u16)
-                        .min(chat_area.y + chat_area.height.saturating_sub(1));
-                    let row_end = (chat_area.y + visible_end as u16)
-                        .min(chat_area.y + chat_area.height.saturating_sub(1));
-                    let highlight_height = row_end.saturating_sub(row_start) + 1;
-                    if highlight_height > 0 {
-                        let highlight_area = Rect {
-                            x: chat_area.x + 2,
-                            y: row_start,
-                            width: chat_area.width.saturating_sub(4),
-                            height: highlight_height,
+                let first = sel.start_line.min(sel.end_line);
+                let last = sel.start_line.max(sel.end_line);
+                let (col_first, col_last) = if sel.start_line < sel.end_line {
+                    (sel.start_col, sel.end_col)
+                } else if sel.start_line > sel.end_line {
+                    (sel.end_col, sel.start_col)
+                } else {
+                    (
+                        sel.start_col.min(sel.end_col),
+                        sel.start_col.max(sel.end_col),
+                    )
+                };
+                if col_first == col_last {
+                    // zero-width selection, nothing to highlight
+                } else {
+                    let scroll = self.chat.scroll_offset() as usize;
+                    let base_x = chat_area.x + 1;
+                    let full_width = chat_area.width.saturating_sub(1);
+                    for vis_row in 0..chat_area.height {
+                        let logical = scroll + vis_row as usize;
+                        if logical < first || logical > last {
+                            continue;
+                        }
+                        let row_y = chat_area.y + vis_row;
+                        let (hx, hw) = if logical == first && logical == last {
+                            (base_x + col_first, col_last - col_first)
+                        } else if logical == first {
+                            (base_x + col_first, full_width.saturating_sub(col_first))
+                        } else if logical == last {
+                            (base_x, col_last)
+                        } else {
+                            (base_x, full_width)
                         };
+                        if hw == 0 {
+                            continue;
+                        }
                         let highlight = Paragraph::new("")
                             .style(Style::default().bg(CYAN).add_modifier(Modifier::DIM));
-                        frame.render_widget(highlight, highlight_area);
+                        frame.render_widget(
+                            highlight,
+                            Rect {
+                                x: hx,
+                                y: row_y,
+                                width: hw,
+                                height: 1,
+                            },
+                        );
                     }
                 }
             }
@@ -894,7 +940,7 @@ impl App {
                 };
                 let status_text = format!(
                     "▌ {} │ {} │ {} tools{} │  {}{}",
-                    self.last_model,
+                    self.config.model,
                     cwd_short,
                     self.tool_count,
                     ctx_text,
@@ -989,23 +1035,72 @@ fn model_context_limit(model: &str) -> u64 {
     }
 }
 
+/// Return the character index in `s` closest to the given visual column.
+/// `col` is 0-based; the function accounts for Unicode character widths.
+fn col_to_char_index(s: &str, col: u16) -> usize {
+    if col == 0 {
+        return 0;
+    }
+    let mut visual = 0u16;
+    for (i, c) in s.char_indices() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+        if visual + w > col {
+            return i;
+        }
+        visual += w;
+    }
+    s.len()
+}
+
 /// Extract the plain text covered by the selection range from the cached
 /// chat plain-text lines. Returns the selected text as a single string.
-fn extract_selection_text(app: &App, range: SelectionRange) -> String {
-    if app.chat_plain_lines.is_empty() {
+fn extract_selection_text(lines: &[String], range: SelectionRange) -> String {
+    if lines.is_empty() {
         return String::new();
     }
-    let start = range.start_line.min(range.end_line);
-    let end = range.start_line.max(range.end_line);
-    if start >= app.chat_plain_lines.len() {
+    let first = range.start_line.min(range.end_line);
+    let last = range.start_line.max(range.end_line);
+    let col_start: u16;
+    let col_end: u16;
+    if range.start_line < range.end_line {
+        col_start = range.start_col;
+        col_end = range.end_col;
+    } else if range.start_line > range.end_line {
+        col_start = range.end_col;
+        col_end = range.start_col;
+    } else {
+        col_start = range.start_col.min(range.end_col);
+        col_end = range.start_col.max(range.end_col);
+    }
+
+    if first >= lines.len() {
         return String::new();
     }
-    let end = end.min(app.chat_plain_lines.len() - 1);
-    let selected: Vec<&str> = app.chat_plain_lines[start..=end]
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-    selected.join("\n")
+    let last = last.min(lines.len() - 1);
+
+    if first == last {
+        // Single line — clip by column range
+        let line = &lines[first];
+        let lo = col_to_char_index(line, col_start);
+        let hi = col_to_char_index(line, col_end);
+        line[lo..hi].to_string()
+    } else {
+        // Multiple lines
+        let mut parts = Vec::new();
+        // First line: from col_start to end
+        let first_line = &lines[first];
+        let lo = col_to_char_index(first_line, col_start);
+        parts.push(first_line[lo..].to_string());
+        // Middle lines: entire
+        for line in &lines[first + 1..last] {
+            parts.push(line.clone());
+        }
+        // Last line: from start to col_end
+        let last_line = &lines[last];
+        let hi = col_to_char_index(last_line, col_end);
+        parts.push(last_line[..hi].to_string());
+        parts.join("\n")
+    }
 }
 
 async fn run_agent_task(mut agent: Agent, mut cmd_rx: mpsc::UnboundedReceiver<AgentCommand>) {

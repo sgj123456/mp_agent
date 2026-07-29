@@ -42,6 +42,19 @@ impl SuggestionItem {
     }
 }
 
+/// Fallback hints shown when no AI prediction is available and input is empty.
+const EMPTY_HINTS: &[&str] = &[
+    "解释代码...",
+    "修改这个功能...",
+    "添加注释或文档...",
+    "修复问题...",
+    "重构代码...",
+    "添加测试...",
+    "解释这段代码的工作原理",
+    "帮我优化一下",
+    "添加新功能...",
+];
+
 pub struct InputArea {
     buffer: String,
     cursor_pos: usize,
@@ -54,6 +67,10 @@ pub struct InputArea {
     /// todo descriptions, etc.) used for tab-completion when the input is
     /// non-empty and does not start with '/'.
     context_suggestions: Vec<SuggestionItem>,
+    /// Rotates through EMPTY_HINTS on each render for a fresh feel.
+    hint_index: usize,
+    /// AI-predicted next user input, shown as gray text when buffer is empty.
+    predicted_input: Option<String>,
 }
 
 impl InputArea {
@@ -66,6 +83,8 @@ impl InputArea {
             tab_suggestion: None,
             suggestion_cursor: None,
             context_suggestions: Vec::new(),
+            hint_index: 0,
+            predicted_input: None,
         }
     }
 
@@ -100,20 +119,24 @@ impl InputArea {
 
         let mut visual_line = 0usize;
         let mut visual_col = 0usize;
-        let mut cursor = 0usize;
 
         for (byte_idx, c) in self.buffer.char_indices() {
             if visual_line > target_line {
-                break;
+                self.cursor_pos = byte_idx;
+                self.tab_suggestion = None;
+                return;
             }
-            cursor = byte_idx;
             if visual_line == target_line && visual_col >= target_col {
-                break;
+                self.cursor_pos = byte_idx;
+                self.tab_suggestion = None;
+                return;
             }
             match c {
                 '\n' => {
                     if visual_line == target_line {
-                        break;
+                        self.cursor_pos = byte_idx;
+                        self.tab_suggestion = None;
+                        return;
                     }
                     visual_line += 1;
                     visual_col = 0;
@@ -123,10 +146,6 @@ impl InputArea {
                     if visual_col > 0 && visual_col + w > cw {
                         visual_line += 1;
                         visual_col = w;
-                        if visual_line > target_line {
-                            cursor = byte_idx;
-                            break;
-                        }
                     } else {
                         visual_col += w;
                     }
@@ -134,7 +153,7 @@ impl InputArea {
             }
         }
 
-        self.cursor_pos = cursor;
+        self.cursor_pos = self.buffer.len();
         self.tab_suggestion = None;
     }
 
@@ -152,6 +171,11 @@ impl InputArea {
     pub fn set_context_suggestions(&mut self, suggestions: Vec<SuggestionItem>) {
         self.context_suggestions = suggestions;
         self.suggestion_cursor = None;
+    }
+
+    /// Store the AI-predicted next user input (shown as gray text when empty).
+    pub fn set_prediction(&mut self, prediction: String) {
+        self.predicted_input = Some(prediction);
     }
 
     pub fn get_input(&self) -> String {
@@ -297,6 +321,16 @@ impl InputArea {
             }
         }
 
+        // Empty buffer → fill ghost text (prediction or EMPTY_HINT)
+        if input.is_empty()
+            && let Some(s) = self.ghost_suffix_text()
+        {
+            self.buffer = s;
+            self.cursor_pos = self.buffer.len();
+            self.tab_suggestion = None;
+            return;
+        }
+
         if input.is_empty() || input.starts_with('/') {
             let partial = input.to_lowercase();
             let matches: Vec<SuggestionItem> = self
@@ -378,12 +412,23 @@ impl InputArea {
     }
 
     /// Ghost suffix text shown after the buffer as a dim completion hint.
-    /// Only shown when there is exactly one matching context suggestion and
-    /// the user is typing a non-slash command.
+    /// When the buffer is non-empty, returns the remainder of the single best
+    /// matching context suggestion. When the buffer is empty, returns the
+    /// AI-predicted next input (if available), falling back to the current
+    /// EMPTY_HINT text (with decoration stripped).
     fn ghost_suffix_text(&self) -> Option<String> {
         let buffer = &self.buffer;
-        if buffer.is_empty() || buffer.starts_with('/') {
+        if buffer.starts_with('/') {
             return None;
+        }
+        if buffer.is_empty() {
+            if self.predicted_input.is_some() {
+                return self.predicted_input.clone();
+            }
+            let idx = (self.hint_index / 180) % EMPTY_HINTS.len();
+            let hint = EMPTY_HINTS[idx];
+            let clean = hint.strip_prefix("▸ ").unwrap_or(hint);
+            return Some(clean.to_string());
         }
         let matches = self.matching_commands();
         if matches.len() != 1 {
@@ -522,7 +567,7 @@ impl InputArea {
         frame.render_widget(paragraph, area);
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let content_width = area.width.saturating_sub(2);
         let buffer = &self.buffer;
         let is_slash_command = buffer.starts_with('/');
@@ -560,14 +605,16 @@ impl InputArea {
                 last.push_span(Span::styled(suffix.clone(), Style::default().fg(TEXT_DIM)));
             }
             Paragraph::new(Text::from(lines))
-        } else if let Some(first) = self.context_suggestions.first() {
+        } else if let Some(predicted) = &self.predicted_input {
             Paragraph::new(Line::from(Span::styled(
-                first.label(),
+                format!("▸ {}...", predicted),
                 Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
             )))
         } else {
+            let idx = (self.hint_index / 180) % EMPTY_HINTS.len();
+            let hint = EMPTY_HINTS[idx];
             Paragraph::new(Line::from(Span::styled(
-                " ▸ Type a message... (/help for commands)",
+                hint,
                 Style::default().fg(TEXT_DIM).add_modifier(Modifier::ITALIC),
             )))
         };
@@ -588,6 +635,12 @@ impl InputArea {
         let cursor_x = area.x + 1 + cursor_col;
         if cursor_y < area.y + area.height - 1 && cursor_x < area.x + area.width - 1 {
             frame.set_cursor_position((cursor_x, cursor_y));
+        }
+
+        // Advance the frame counter; only rotate the displayed hint every
+        // ~3 seconds (~180 frames at 60fps) so it doesn't flicker.
+        if buffer.is_empty() {
+            self.hint_index = self.hint_index.wrapping_add(1);
         }
     }
 }

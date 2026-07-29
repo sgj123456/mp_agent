@@ -50,6 +50,8 @@ pub enum AgentEvent {
         error: String,
     },
     McpConnectionsDone,
+    /// AI-predicted next user input (generated after each response).
+    NextInputPrediction(String),
 }
 
 #[derive(Debug)]
@@ -271,6 +273,24 @@ impl Agent {
                     .event_tx
                     .send(AgentEvent::MessageComplete(full_response.clone()));
                 let _ = self.event_tx.send(AgentEvent::Done);
+
+                // Fire off a lightweight prediction for the next user input
+                let tx = self.event_tx.clone();
+                let config = self.config.clone();
+                let recent = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .take(4)
+                    .filter_map(msg_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                tokio::spawn(async move {
+                    if let Some(prediction) = predict_next_input(&config, &recent).await {
+                        let _ = tx.send(AgentEvent::NextInputPrediction(prediction));
+                    }
+                });
+
                 return full_response;
             }
 
@@ -655,4 +675,71 @@ fn extract_answer(content: &str) -> Option<String> {
         return Some(String::new());
     }
     Some(content[inner_start..end].trim().to_string())
+}
+
+/// Extract the text content of a chat message (if it has text).
+fn msg_text(msg: &ChatCompletionRequestMessage) -> Option<String> {
+    match msg {
+        ChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => Some(format!("User: {}", t)),
+            _ => None,
+        },
+        ChatCompletionRequestMessage::Assistant(a) => match &a.content {
+            Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => {
+                Some(format!("Assistant: {}", t))
+            }
+            _ => None,
+        },
+        ChatCompletionRequestMessage::System(s) => match &s.content {
+            ChatCompletionRequestSystemMessageContent::Text(t) => Some(format!("System: {}", t)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Ask the model to predict what the user will type next, based on the recent
+/// conversation history. Returns the prediction or None on error/timeout.
+async fn predict_next_input(config: &Config, recent: &str) -> Option<String> {
+    let url = format!("{}/chat/completions", config.base_url);
+    let body = serde_json::json!({
+        "model": config.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Based on the conversation, predict what the user will say next in under 100 characters. Return ONLY the prediction, no explanation, no quotes, no punctuation."
+            },
+            {
+                "role": "user",
+                "content": format!("Recent conversation:\n{}", recent)
+            }
+        ],
+        "max_tokens": 500,
+        "temperature": 1,
+        "stream": false
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let data: Value = resp.json().await.ok()?;
+    let text = data["choices"][0]["message"]["content"]
+        .as_str()?
+        .trim()
+        .to_string();
+    // Use char count, not byte count — Chinese/Japanese text needs 3 bytes/char
+    if text.is_empty() || text.chars().count() > 40 {
+        return None;
+    }
+    Some(text)
 }

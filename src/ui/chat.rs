@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::{
     ACCENT, BG, CYAN, DIFF_ADD, DIFF_HEADER, DIFF_REMOVE, GREEN, RED, TEXT, TEXT_DIM, YELLOW,
@@ -74,7 +74,7 @@ impl ChatArea {
             ChatMessage::Assistant(text) => {
                 let mut lines = vec![Self::card_header("Assistant", CYAN)];
                 let rendered = markdown::render_markdown(text);
-                for line in Self::wrap_markdown_lines(rendered, CYAN) {
+                for line in rendered {
                     lines.push(line);
                 }
                 lines.push(Line::from(""));
@@ -103,7 +103,7 @@ impl ChatArea {
             ChatMessage::System(text) => {
                 let mut lines = vec![Self::card_header("System", ACCENT)];
                 let rendered = markdown::render_markdown(text);
-                for line in Self::wrap_markdown_lines(rendered, ACCENT) {
+                for line in rendered {
                     lines.push(line);
                 }
                 lines.push(Line::from(""));
@@ -331,35 +331,6 @@ impl ChatArea {
         ])
     }
 
-    fn wrap_markdown_lines(rendered: Vec<Line<'static>>, color: Color) -> Vec<Line<'static>> {
-        let mut out = Vec::with_capacity(rendered.len());
-        let bar_style = Style::default().fg(color).add_modifier(Modifier::DIM);
-        for line in rendered {
-            let text = Self::line_to_plain(&line);
-            if text.starts_with('┌')
-                || text.starts_with('│')
-                || text.starts_with('└')
-                || text.starts_with('├')
-                || text.starts_with('┠')
-                || text.starts_with('┷')
-                || text.starts_with('━')
-                || text.starts_with("──")
-                || text.starts_with('▍')
-            {
-                out.push(line);
-            } else {
-                let mut spans = vec![Span::styled(" │ ", bar_style)];
-                spans.extend(line);
-                out.push(Line::from(spans));
-            }
-        }
-        out
-    }
-
-    fn line_to_plain(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
     fn build_visible_lines(
         &mut self,
         area_height: u16,
@@ -423,7 +394,7 @@ impl ChatArea {
             }
             let cursor_pos = content_offset + preview_text.lines().count();
             if cursor_pos >= soff && cursor_pos < eoff {
-                lines.push(Line::from(Span::styled(" │ ▋", Style::default().fg(CYAN))));
+                lines.push(Line::from(Span::styled("  ▋", Style::default().fg(CYAN))));
             }
             global = self.total_lines_cache + preview_count;
         }
@@ -457,7 +428,11 @@ impl ChatArea {
     }
 
     fn render_lines(&mut self, frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(TEXT_DIM).add_modifier(Modifier::DIM));
         let paragraph = Paragraph::new(lines)
+            .block(block)
             .scroll((0, 0))
             .wrap(Wrap { trim: false })
             .style(Style::default().bg(BG));
